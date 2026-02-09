@@ -1,4 +1,3 @@
-
 import numpy as np
 
 class Base_agent:

@@ -1,8 +1,7 @@
-
 import random
 import numpy as np
-from CybORG_plus_plus.mini_CAGE.minimal import HOSTS
-from CybORG_plus_plus.mini_CAGE.test_agent import Base_agent
+from minimal import HOSTS
+from test_agent import Base_agent
 
 
 class Base_agent:
