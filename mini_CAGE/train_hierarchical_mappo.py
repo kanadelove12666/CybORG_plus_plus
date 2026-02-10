@@ -57,11 +57,62 @@ SAVE_DIR.mkdir(parents=True, exist_ok=True)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ═══════════════════════════════════════════════════════════════════════
-# Network Architecture
+# Running Statistics for Normalization (Modern RL Best Practice)
+# ═══════════════════════════════════════════════════════════════════════
+
+class RunningMeanStd:
+    """
+    Running mean and standard deviation tracker.
+    Used for observation and reward normalization.
+    """
+    def __init__(self, shape: Tuple[int, ...], epsilon: float = 1e-4):
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.var = np.ones(shape, dtype=np.float64)
+        self.count = epsilon
+        self.epsilon = epsilon
+
+    def update(self, x: np.ndarray):
+        """Update running statistics with new data."""
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+        self._update_from_moments(batch_mean, batch_var, batch_count)
+
+    def _update_from_moments(self, batch_mean: np.ndarray, batch_var: np.ndarray, batch_count: int):
+        """Update running statistics from batch moments."""
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
+        new_var = M2 / tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = tot_count
+
+    def normalize(self, x: np.ndarray, clip: float = 10.0) -> np.ndarray:
+        """Normalize input using running statistics."""
+        return np.clip((x - self.mean) / np.sqrt(self.var + self.epsilon), -clip, clip)
+
+    def normalize_torch(self, x: torch.Tensor, clip: float = 10.0) -> torch.Tensor:
+        """Normalize torch tensor using running statistics."""
+        mean = torch.from_numpy(self.mean).to(x.device).float()
+        std = torch.from_numpy(np.sqrt(self.var + self.epsilon)).to(x.device).float()
+        return torch.clamp((x - mean) / std, -clip, clip)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Network Architecture (Modern Best Practices)
 # ═══════════════════════════════════════════════════════════════════════
 
 class MLP(nn.Module):
-    """Multi-layer perceptron with optional layer normalization."""
+    """
+    Multi-layer perceptron with LayerNorm and proper initialization.
+    Modern RL best practice: LayerNorm + Orthogonal init for stability.
+    """
 
     def __init__(
         self,
@@ -69,7 +120,54 @@ class MLP(nn.Module):
         hidden_dims: List[int],
         output_dim: int,
         activation: str = "tanh",
-        layer_norm: bool = False,
+        layer_norm: bool = True,  # Default to True for modern training
+        output_gain: float = 0.01,  # Small gain for value/policy output layers
+    ):
+        super().__init__()
+
+        layers = []
+        prev_dim = input_dim
+
+        for i, hidden_dim in enumerate(hidden_dims):
+            linear = nn.Linear(prev_dim, hidden_dim)
+            # Orthogonal init with sqrt(2) for hidden layers
+            nn.init.orthogonal_(linear.weight, gain=np.sqrt(2))
+            nn.init.constant_(linear.bias, 0.0)
+            layers.append(linear)
+
+            if layer_norm:
+                layers.append(nn.LayerNorm(hidden_dim))
+
+            if activation == "tanh":
+                layers.append(nn.Tanh())
+            elif activation == "relu":
+                layers.append(nn.ReLU())
+            prev_dim = hidden_dim
+
+        # Output layer
+        output_layer = nn.Linear(prev_dim, output_dim)
+        nn.init.orthogonal_(output_layer.weight, gain=output_gain)
+        nn.init.constant_(output_layer.bias, 0.0)
+        layers.append(output_layer)
+
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.network(x)
+
+
+class ValueMLP(nn.Module):
+    """
+    Value network with LayerNorm and optional value clipping.
+    Uses smaller output gain for stable value estimation.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: List[int],
+        activation: str = "tanh",
+        layer_norm: bool = True,
     ):
         super().__init__()
 
@@ -77,28 +175,29 @@ class MLP(nn.Module):
         prev_dim = input_dim
 
         for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
+            linear = nn.Linear(prev_dim, hidden_dim)
+            nn.init.orthogonal_(linear.weight, gain=np.sqrt(2))
+            nn.init.constant_(linear.bias, 0.0)
+            layers.append(linear)
+
             if layer_norm:
                 layers.append(nn.LayerNorm(hidden_dim))
+
             if activation == "tanh":
                 layers.append(nn.Tanh())
             elif activation == "relu":
                 layers.append(nn.ReLU())
             prev_dim = hidden_dim
 
-        layers.append(nn.Linear(prev_dim, output_dim))
-        self.network = nn.Sequential(*layers)
-
-        # Initialize weights
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
-            nn.init.constant_(module.bias, 0.0)
+        # Value output with small gain for stability
+        self.body = nn.Sequential(*layers)
+        self.value_head = nn.Linear(prev_dim, 1)
+        nn.init.orthogonal_(self.value_head.weight, gain=0.01)
+        nn.init.constant_(self.value_head.bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.network(x)
+        features = self.body(x)
+        return self.value_head(features)
 
 
 class ManagerNetwork(nn.Module):
@@ -119,20 +218,22 @@ class ManagerNetwork(nn.Module):
 
         self.num_hosts = num_hosts
 
-        # Policy head for host selection
+        # Policy head for host selection (use larger gain for policy)
         self.policy = MLP(
             input_dim=obs_dim,
             hidden_dims=[hidden_dim, hidden_dim],
             output_dim=num_hosts,
             activation="tanh",
+            layer_norm=True,
+            output_gain=0.01,
         )
 
-        # Value head for critic
-        self.value = MLP(
+        # Value head for critic (separate network with small output gain)
+        self.value = ValueMLP(
             input_dim=obs_dim,
             hidden_dims=[hidden_dim, hidden_dim],
-            output_dim=1,
             activation="tanh",
+            layer_norm=True,
         )
 
     def forward(
@@ -218,14 +319,16 @@ class WorkerNetwork(nn.Module):
             hidden_dims=[hidden_dim, hidden_dim],
             output_dim=num_actions,
             activation="tanh",
+            layer_norm=True,
+            output_gain=0.01,
         )
 
-        # Value head for critic (optional, can use manager's value)
-        self.value = MLP(
+        # Value head for critic (separate network with small output gain)
+        self.value = ValueMLP(
             input_dim=host_obs_dim + goal_dim,
             hidden_dims=[hidden_dim, hidden_dim],
-            output_dim=1,
             activation="tanh",
+            layer_norm=True,
         )
 
     def forward(
@@ -594,6 +697,7 @@ class MAPPOTrainer:
     Multi-Agent PPO Trainer for Hierarchical Policy.
 
     Implements PPO with clipped surrogate objective for both manager and worker.
+    Aligned with Stable-Baselines3 PPO implementation.
     """
 
     def __init__(
@@ -607,7 +711,10 @@ class MAPPOTrainer:
         value_coef: float = 0.5,
         entropy_coef: float = 0.01,
         max_grad_norm: float = 0.5,
+        gae_lambda: float = 0.95,
+        target_kl: float = 0.015,  # SB3 default: stop early if KL divergence exceeds this
         device: torch.device = DEVICE,
+        use_linear_lr_schedule: bool = True,  # Enable linear LR decay like SB3
     ):
         self.policy = policy.to(device)
         self.lr = lr
@@ -618,10 +725,18 @@ class MAPPOTrainer:
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
         self.max_grad_norm = max_grad_norm
+        self.gae_lambda = gae_lambda
+        self.target_kl = target_kl
         self.device = device
+        self.use_linear_lr_schedule = use_linear_lr_schedule
 
         # Optimizer for both manager and worker
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+
+        # Learning rate scheduler (linear decay like SB3)
+        self.lr_scheduler = None
+        self.num_timesteps = 0
+        self.total_timesteps = TOTAL_TIMESTEPS  # Will be updated in training loop
 
         # Training statistics
         self.stats = {
@@ -630,7 +745,18 @@ class MAPPOTrainer:
             "entropy_loss": [],
             "approx_kl": [],
             "clip_fraction": [],
+            "n_updates": 0,
+            "learning_rate": lr,
         }
+
+    def update_lr_schedule(self, progress: float):
+        """Update learning rate based on training progress (0 to 1)."""
+        if self.use_linear_lr_schedule and self.lr_scheduler is None:
+            # Manual LR update: lr = initial_lr * (1 - progress)
+            new_lr = self.lr * (1.0 - progress)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = new_lr
+            self.stats["learning_rate"] = new_lr
 
     def compute_gae(
         self,
@@ -638,7 +764,6 @@ class MAPPOTrainer:
         values: torch.Tensor,
         dones: torch.Tensor,
         next_value: float,
-        gae_lambda: float = 0.95,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute Generalized Advantage Estimation.
@@ -648,7 +773,6 @@ class MAPPOTrainer:
             values: Value tensor [buffer_size]
             dones: Done tensor [buffer_size]
             next_value: Value of next state
-            gae_lambda: GAE lambda parameter
 
         Returns:
             advantages: Advantage estimates [buffer_size]
@@ -669,24 +793,28 @@ class MAPPOTrainer:
                 next_non_terminal = 1.0 - dones[t]
 
             delta = rewards[t] + self.gamma * next_val * next_non_terminal - combined_values[t]
-            last_gae = delta + self.gamma * gae_lambda * next_non_terminal * last_gae
+            last_gae = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae
             advantages[t] = last_gae
 
         returns = advantages + combined_values
 
         return advantages, returns
 
-    def update(self, buffer: HierarchicalRolloutBuffer, next_obs: np.ndarray) -> Dict[str, float]:
+    def update(self, buffer: HierarchicalRolloutBuffer, next_obs: np.ndarray, progress: float = 0.0) -> Dict[str, float]:
         """
         Update policy using PPO.
 
         Args:
             buffer: Rollout buffer with collected data
             next_obs: Next observation for value bootstrapping
+            progress: Training progress (0.0 to 1.0) for LR schedule
 
         Returns:
             stats: Dictionary of training statistics
         """
+        # Update learning rate schedule
+        self.update_lr_schedule(progress)
+
         # Get data from buffer
         data = buffer.get()
 
@@ -704,7 +832,7 @@ class MAPPOTrainer:
             next_value,
         )
 
-        # Normalize advantages
+        # Normalize advantages (SB3 style)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Training loop
@@ -713,7 +841,11 @@ class MAPPOTrainer:
         total_entropy_loss = 0.0
         total_approx_kl = 0.0
         total_clip_fraction = 0.0
+        total_explained_var = 0.0
         num_updates = 0
+
+        # Track if we stopped early due to KL divergence
+        early_stopped = False
 
         for epoch in range(self.n_epochs):
             # Generate random indices
@@ -755,21 +887,27 @@ class MAPPOTrainer:
                 worker_ratio = torch.exp(worker_log_prob - batch_old_worker_log_probs)
                 combined_ratio = manager_ratio * worker_ratio
 
+                # Clipped surrogate loss
                 surr1 = combined_ratio * batch_advantages
                 surr2 = torch.clamp(combined_ratio, 1 - self.clip_range, 1 + self.clip_range) * batch_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Compute value loss
+                # Compute value loss (SB3-style clipped MSE)
+                # Unclipped value loss
+                value_loss_unclipped = nn.functional.mse_loss(manager_value, batch_returns)
+
+                # Clipped value loss
                 value_pred_clipped = batch_old_manager_values + torch.clamp(
                     manager_value - batch_old_manager_values,
                     -self.clip_range,
                     self.clip_range,
                 )
-                value_loss1 = nn.functional.mse_loss(manager_value, batch_returns)
-                value_loss2 = nn.functional.mse_loss(value_pred_clipped, batch_returns)
-                value_loss = 0.5 * torch.max(value_loss1, value_loss2)
+                value_loss_clipped = nn.functional.mse_loss(value_pred_clipped, batch_returns)
 
-                # Compute entropy loss
+                # Take the maximum (like SB3)
+                value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped)
+
+                # Compute entropy loss (negative because we want to maximize entropy)
                 entropy_loss = -(manager_entropy.mean() + worker_entropy.mean())
 
                 # Total loss
@@ -787,12 +925,26 @@ class MAPPOTrainer:
                                 (batch_old_worker_log_probs - worker_log_prob).mean()) / 2
                     clip_fraction = ((combined_ratio - 1.0).abs() > self.clip_range).float().mean()
 
+                    # Explained variance of value function
+                    y_pred = batch_old_manager_values
+                    y_true = batch_returns
+                    var_y = torch.var(y_true)
+                    explained_var = 1 - torch.var(y_true - y_pred) / (var_y + 1e-8)
+
                 total_policy_loss += policy_loss.item()
                 total_value_loss += value_loss.item()
                 total_entropy_loss += entropy_loss.item()
                 total_approx_kl += approx_kl.item()
                 total_clip_fraction += clip_fraction.item()
+                total_explained_var += explained_var.item()
                 num_updates += 1
+
+            # KL Early Stopping (SB3 style)
+            if self.target_kl is not None and total_approx_kl / num_updates > self.target_kl:
+                early_stopped = True
+                break
+
+        self.stats["n_updates"] += num_updates
 
         # Average statistics
         stats = {
@@ -801,6 +953,10 @@ class MAPPOTrainer:
             "entropy_loss": total_entropy_loss / num_updates,
             "approx_kl": total_approx_kl / num_updates,
             "clip_fraction": total_clip_fraction / num_updates,
+            "explained_variance": total_explained_var / num_updates,
+            "learning_rate": self.stats["learning_rate"],
+            "n_updates": self.stats["n_updates"],
+            "early_stopped": early_stopped,
         }
 
         return stats
@@ -839,15 +995,21 @@ class HierarchicalMAPPOTrainer:
         n_rollout_steps: int = 2048,
         learning_rate: float = LEARNING_RATE,
         gamma: float = GAMMA,
+        gae_lambda: float = 0.95,
         clip_range: float = CLIP_RANGE,
         n_epochs: int = N_EPOCHS,
         batch_size: int = 64,
+        value_coef: float = 0.5,
+        entropy_coef: float = 0.01,
+        max_grad_norm: float = 0.5,
+        target_kl: float = 0.015,
         hidden_dim: int = 128,
         device: torch.device = DEVICE,
         save_dir: Path = SAVE_DIR,
         use_wandb: bool = USE_WANDB,
         use_tensorboard: bool = USE_TENSORBOARD,
         run_name: Optional[str] = None,
+        use_linear_lr_schedule: bool = True,
     ):
         self.env = env
         self.total_timesteps = total_timesteps
@@ -868,16 +1030,24 @@ class HierarchicalMAPPOTrainer:
             hidden_dim=hidden_dim,
         )
 
-        # Initialize trainer
+        # Initialize trainer with full SB3-aligned hyperparameters
         self.trainer = MAPPOTrainer(
             policy=self.policy,
             lr=learning_rate,
             gamma=gamma,
+            gae_lambda=gae_lambda,
             clip_range=clip_range,
             n_epochs=n_epochs,
             batch_size=batch_size,
+            value_coef=value_coef,
+            entropy_coef=entropy_coef,
+            max_grad_norm=max_grad_norm,
+            target_kl=target_kl,
             device=device,
+            use_linear_lr_schedule=use_linear_lr_schedule,
         )
+        # Pass total timesteps to trainer for LR schedule
+        self.trainer.total_timesteps = total_timesteps
 
         # Initialize rollout buffer
         self.buffer = HierarchicalRolloutBuffer(
@@ -889,6 +1059,14 @@ class HierarchicalMAPPOTrainer:
         # Setup logging
         self.run_name = run_name or f"hierarchical_mappo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.writer = None
+
+        # Running statistics for observation and reward normalization
+        # Modern RL best practice: normalize obs and rewards
+        self.obs_rms = RunningMeanStd(shape=(self.obs_dim,))
+        self.ret_rms = RunningMeanStd(shape=())  # Scalar return normalization
+        self.reward_scale = 1.0  # Will be updated based on running statistics
+        self.normalize_obs = True
+        self.normalize_rewards = True
 
         if use_tensorboard:
             from torch.utils.tensorboard import SummaryWriter
@@ -921,6 +1099,7 @@ class HierarchicalMAPPOTrainer:
     def collect_rollout(self) -> int:
         """
         Collect a rollout of experiences.
+        Uses observation normalization for stable training.
 
         Returns:
             total_steps: Number of steps collected
@@ -929,9 +1108,23 @@ class HierarchicalMAPPOTrainer:
         episode_reward = 0.0
         episode_length = 0
 
-        for step in range(self.n_rollout_steps):
+        # Collect observations for batch update of running statistics
+        obs_buffer = []
+        reward_buffer = []
+
+        for _ in range(self.n_rollout_steps):
+            # Update observation running statistics
+            if self.normalize_obs:
+                obs_buffer.append(obs.copy())
+
+            # Normalize observation for policy inference
+            if self.normalize_obs and len(obs_buffer) > 1:
+                obs_normalized = self.obs_rms.normalize(obs)
+            else:
+                obs_normalized = obs
+
             # Convert observation to tensor
-            obs_tensor = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
+            obs_tensor = torch.as_tensor(obs_normalized, dtype=torch.float32).unsqueeze(0).to(self.device)
 
             # Get actions from hierarchical policy
             with torch.no_grad():
@@ -940,8 +1133,8 @@ class HierarchicalMAPPOTrainer:
                     worker_action,
                     manager_log_prob,
                     worker_log_prob,
-                    manager_entropy,
-                    worker_entropy,
+                    _,
+                    _,
                 ) = self.policy.get_action_and_value(obs_tensor)
 
                 # Convert to environment action
@@ -959,12 +1152,22 @@ class HierarchicalMAPPOTrainer:
             manager_log_prob_np = manager_log_prob.cpu().numpy()[0]
             worker_log_prob_np = worker_log_prob.cpu().numpy()[0]
 
-            next_obs, reward, terminated, truncated, info = self.env.step(env_action_np)
+            next_obs, reward, terminated, truncated, _ = self.env.step(env_action_np)
             done = terminated or truncated
 
-            # Store transition
+            # Collect reward for running statistics
+            reward_buffer.append(reward)
+
+            # Normalize reward for training (but log original reward)
+            normalized_reward = reward
+            if self.normalize_rewards and len(reward_buffer) > 1:
+                # Use simple scaling based on running std
+                if self.ret_rms.count > 1:
+                    normalized_reward = reward / (np.sqrt(self.ret_rms.var) + 1e-8)
+
+            # Store transition (with normalized observation and reward)
             self.buffer.add(
-                obs=obs,
+                obs=obs_normalized,
                 manager_action=manager_action_np,
                 worker_action=worker_action_np,
                 env_action=env_action_np,
@@ -972,11 +1175,11 @@ class HierarchicalMAPPOTrainer:
                 worker_log_prob=worker_log_prob_np,
                 manager_value=manager_value,
                 worker_value=worker_value,
-                reward=reward,
+                reward=normalized_reward,
                 done=done,
             )
 
-            episode_reward += reward
+            episode_reward += reward  # Track original reward
             episode_length += 1
 
             # Handle episode end
@@ -990,6 +1193,15 @@ class HierarchicalMAPPOTrainer:
             else:
                 obs = next_obs
 
+        # Update running statistics with collected data
+        if self.normalize_obs and len(obs_buffer) > 0:
+            obs_array = np.stack(obs_buffer)
+            self.obs_rms.update(obs_array)
+
+        if self.normalize_rewards and len(reward_buffer) > 0:
+            rewards_array = np.array(reward_buffer)
+            self.ret_rms.update(rewards_array.reshape(-1, 1))
+
         return self.n_rollout_steps
 
     def train(self):
@@ -997,7 +1209,7 @@ class HierarchicalMAPPOTrainer:
         print(f"Starting Hierarchical MAPPO training for {self.total_timesteps} timesteps")
         print(f"Device: {self.device}")
         print(f"Save directory: {self.save_dir}")
-        print("-" * 80)
+        print("-" * 56)
 
         total_steps = 0
         iteration = 0
@@ -1010,54 +1222,86 @@ class HierarchicalMAPPOTrainer:
             steps = self.collect_rollout()
             total_steps += steps
 
-            # Get last observation for bootstrapping
+            # Get last observation for bootstrapping (with normalization)
             obs, _ = self.env.reset()
+            if self.normalize_obs:
+                obs = self.obs_rms.normalize(obs)
+
+            # Calculate progress for LR schedule
+            progress = total_steps / self.total_timesteps
 
             # Update policy
-            stats = self.trainer.update(self.buffer, obs)
+            stats = self.trainer.update(self.buffer, obs, progress=progress)
             self.buffer.clear()
 
             # Logging
             if len(self.episode_rewards) > 0:
-                mean_reward = np.mean(list(self.episode_rewards)[-10:])
-                mean_length = np.mean(list(self.episode_lengths)[-10:])
+                mean_reward = np.mean(list(self.episode_rewards)[-100:])
+                mean_length = np.mean(list(self.episode_lengths)[-100:])
             else:
                 mean_reward = 0.0
                 mean_length = 0.0
 
             fps = total_steps / (time.time() - start_time)
+            time_elapsed = time.time() - start_time
 
-            # Print progress (aligned with SB3 format)
-            print(
-                f"| iteration {iteration:>5} | step {total_steps:>10} | "
-                f"reward {mean_reward:>10.4f} | length {mean_length:>6.1f} | "
-                f"fps {fps:>8.1f} |"
-            )
+            # Print progress (SB3-style format with categories)
+            print(f"| rollout/ | iteration | {iteration:>8} |")
+            print(f"|          | steps     | {total_steps:>8} |")
+            print(f"|          | episodes  | {len(self.episode_rewards):>8} |")
+            print(f"|          | reward    | {mean_reward:>10.4f} |")
+            print(f"|          | length    | {mean_length:>10.2f} |")
+            print(f"| time/    | fps       | {fps:>10.2f} |")
+            print(f"|          | elapsed   | {time_elapsed:>10.2f} |")
+            print(f"| train/   | policy_l  | {stats['policy_loss']:>10.4f} |")
+            print(f"|          | value_l   | {stats['value_loss']:>10.4f} |")
+            print(f"|          | entropy_l | {stats['entropy_loss']:>10.4f} |")
+            print(f"|          | approx_kl | {stats['approx_kl']:>10.4f} |")
+            print(f"|          | clip_frac | {stats['clip_fraction']:>10.4f} |")
+            print(f"|          | explained | {stats['explained_variance']:>10.4f} |")
+            print(f"|          | n_updates | {stats['n_updates']:>8} |")
+            print(f"|          | lr        | {stats['learning_rate']:>10.6f} |")
+            if stats.get('early_stopped'):
+                print(f"|          | early_stop| True     |")
+            print("-" * 56)
 
-            # TensorBoard logging
+            # TensorBoard logging (SB3-style namespaces)
             if self.writer is not None:
-                self.writer.add_scalar("train/mean_reward", mean_reward, total_steps)
-                self.writer.add_scalar("train/mean_length", mean_length, total_steps)
+                # Rollout metrics
+                self.writer.add_scalar("rollout/ep_rew_mean", mean_reward, total_steps)
+                self.writer.add_scalar("rollout/ep_len_mean", mean_length, total_steps)
+                self.writer.add_scalar("rollout/episodes", len(self.episode_rewards), total_steps)
+                # Time metrics
+                self.writer.add_scalar("time/fps", fps, total_steps)
+                self.writer.add_scalar("time/iterations", iteration, total_steps)
+                # Train metrics
                 self.writer.add_scalar("train/policy_loss", stats["policy_loss"], total_steps)
                 self.writer.add_scalar("train/value_loss", stats["value_loss"], total_steps)
                 self.writer.add_scalar("train/entropy_loss", stats["entropy_loss"], total_steps)
                 self.writer.add_scalar("train/approx_kl", stats["approx_kl"], total_steps)
                 self.writer.add_scalar("train/clip_fraction", stats["clip_fraction"], total_steps)
-                self.writer.add_scalar("train/fps", fps, total_steps)
+                self.writer.add_scalar("train/explained_variance", stats["explained_variance"], total_steps)
+                self.writer.add_scalar("train/n_updates", stats["n_updates"], total_steps)
+                self.writer.add_scalar("train/learning_rate", stats["learning_rate"], total_steps)
 
-            # WandB logging
+            # WandB logging (SB3-style)
             if self.use_wandb:
                 import wandb
                 wandb.log({
-                    "train/mean_reward": mean_reward,
-                    "train/mean_length": mean_length,
+                    "rollout/ep_rew_mean": mean_reward,
+                    "rollout/ep_len_mean": mean_length,
+                    "rollout/episodes": len(self.episode_rewards),
+                    "time/fps": fps,
+                    "time/iterations": iteration,
                     "train/policy_loss": stats["policy_loss"],
                     "train/value_loss": stats["value_loss"],
                     "train/entropy_loss": stats["entropy_loss"],
                     "train/approx_kl": stats["approx_kl"],
                     "train/clip_fraction": stats["clip_fraction"],
-                    "train/fps": fps,
-                    "train/step": total_steps,
+                    "train/explained_variance": stats["explained_variance"],
+                    "train/n_updates": stats["n_updates"],
+                    "train/learning_rate": stats["learning_rate"],
+                    "global_step": total_steps,
                 })
 
             # Save checkpoint
@@ -1066,7 +1310,7 @@ class HierarchicalMAPPOTrainer:
 
         # Final save
         self.save_checkpoint("final")
-        print("-" * 80)
+        print("-" * 56)
         print(f"Training completed! Total steps: {total_steps}")
         print(f"Final model saved to {self.save_dir / f'{self.run_name}_final.pt'}")
 
@@ -1140,6 +1384,12 @@ def parse_args():
         help=f"Discount factor (default: {GAMMA})",
     )
     parser.add_argument(
+        "--gae-lambda",
+        type=float,
+        default=0.95,
+        help="GAE lambda parameter (default: 0.95)",
+    )
+    parser.add_argument(
         "--clip-range",
         type=float,
         default=CLIP_RANGE,
@@ -1162,6 +1412,35 @@ def parse_args():
         type=int,
         default=2048,
         help="Number of steps per rollout (default: 2048)",
+    )
+    parser.add_argument(
+        "--value-coef",
+        type=float,
+        default=0.5,
+        help="Value function loss coefficient (default: 0.5)",
+    )
+    parser.add_argument(
+        "--entropy-coef",
+        type=float,
+        default=0.01,
+        help="Entropy loss coefficient (default: 0.01)",
+    )
+    parser.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=0.5,
+        help="Max gradient norm for clipping (default: 0.5)",
+    )
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=0.015,
+        help="Target KL divergence for early stopping, 0 to disable (default: 0.015)",
+    )
+    parser.add_argument(
+        "--no-lr-schedule",
+        action="store_true",
+        help="Disable linear learning rate schedule",
     )
 
     # Model arguments
@@ -1198,7 +1477,10 @@ def parse_args():
         help="Random seed (default: 0)",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Convert --no-lr-schedule to use_linear_lr_schedule
+    args.use_linear_lr_schedule = not args.no_lr_schedule
+    return args
 
 
 def main():
@@ -1222,22 +1504,28 @@ def main():
     time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = args.run_name or f"hierarchical_mappo_{args.red_policy}_{time_tag}"
 
-    # Create trainer
+    # Create trainer with all SB3-aligned hyperparameters
     trainer = HierarchicalMAPPOTrainer(
         env=env,
         total_timesteps=args.total_timesteps,
         n_rollout_steps=args.n_rollout_steps,
         learning_rate=args.learning_rate,
         gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
         clip_range=args.clip_range,
         n_epochs=args.n_epochs,
         batch_size=args.batch_size,
+        value_coef=args.value_coef,
+        entropy_coef=args.entropy_coef,
+        max_grad_norm=args.max_grad_norm,
+        target_kl=args.target_kl,
         hidden_dim=args.hidden_dim,
         device=DEVICE,
         save_dir=SAVE_DIR,
         use_wandb=args.use_wandb,
         use_tensorboard=args.use_tensorboard,
         run_name=run_name,
+        use_linear_lr_schedule=args.use_linear_lr_schedule,
     )
 
     # Train
