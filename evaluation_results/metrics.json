@@ -1,0 +1,14 @@
+{
+  "mean_reward": -102.90533333333343,
+  "std_reward": 0.7915767668254184,
+  "mean_length": 100.0,
+  "win_rate": 1.0,
+  "mean_service_availability": 1.0,
+  "mean_compromised_hosts": 0.019999999999999997,
+  "red_success_rate": 0.0,
+  "blue_success_actions_per_episode": 100.0,
+  "action_distribution": {
+    "12": 20000,
+    "2": 10000
+  }
+}
