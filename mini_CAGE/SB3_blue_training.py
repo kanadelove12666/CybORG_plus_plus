@@ -26,7 +26,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 NUM_RUNS: int = 1
 TOTAL_TIMESTEPS: int = 1_000_000
 
-USE_WANDB: bool = True           # flip to False to disable W&B logging
+USE_WANDB: bool = False           # flip to False to disable W&B logging
 USE_TENSORBOARD: bool = True     # if True, each run gets its own TB dir
 
 WANDB_PROJECT: str = "mini-cage-trial"
