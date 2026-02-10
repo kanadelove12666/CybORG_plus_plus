@@ -127,6 +127,9 @@ class Meander_minimal(Base_agent):
             0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2])
         self.num_hosts = len(self.subnet_structure)
 
+    def reset(self, *args, **kwargs):
+        pass
+
     def get_action(self, observation, *args, **kwargs):
 
         # convert to 2D

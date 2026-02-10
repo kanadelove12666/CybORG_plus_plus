@@ -483,60 +483,194 @@ def evaluate_single_vs_multi(
     return results
 
 
+def evaluate_multiple_configs(
+    model_path: str,
+    mode: str = "ctde",
+    num_episodes: int = 100,
+    steps_list: List[int] = [30, 50, 100],
+    red_policies: List[str] = ["bline", "meander"],
+    save_dir: str = "./evaluation_results",
+    device: str = "auto",
+):
+    """
+    Evaluate model across multiple configurations (aligned with original evaluation.py).
+
+    Args:
+        model_path: Path to trained model
+        mode: 'ippo' or 'ctde'
+        num_episodes: Episodes per configuration
+        steps_list: List of max_steps to test (e.g., [30, 50, 100])
+        red_policies: List of red agents to test (e.g., ['bline', 'meander'])
+        save_dir: Directory to save results
+        device: Computation device
+    """
+    print("="*60)
+    print(f"Multi-Configuration Evaluation")
+    print(f"Model: {model_path}")
+    print(f"Mode: {mode}")
+    print("="*60)
+
+    results = {}
+
+    for num_steps in steps_list:
+        results[num_steps] = {}
+        for red_policy in red_policies:
+            print(f"\n{'='*60}")
+            print(f"Testing: steps={num_steps}, red_agent={red_policy}")
+            print("="*60)
+
+            # Create environment
+            if mode == "ctde":
+                env = MultiAgentCageCTDE(
+                    num_agents=NUM_SUBNETS,
+                    red_policy=red_policy,
+                    remove_bugs=True,
+                    max_steps=num_steps,
+                )
+            else:
+                env = MultiAgentCage(
+                    num_agents=NUM_SUBNETS,
+                    red_policy=red_policy,
+                    remove_bugs=True,
+                    max_steps=num_steps,
+                    mode="independent",
+                    enable_communication=False,
+                )
+
+            # Load trainer
+            trainer = MAPPOTrainer(
+                env=env,
+                num_agents=NUM_SUBNETS,
+                mode=mode,
+                device=device,
+            )
+            trainer.load(model_path)
+
+            # Evaluate
+            evaluator = MultiAgentEvaluator(trainer, env, num_episodes, device)
+            metrics = evaluator.evaluate(red_policy=red_policy)
+
+            results[num_steps][red_policy] = metrics
+
+    # Print summary table
+    print("\n" + "="*80)
+    print("Evaluation Summary")
+    print("="*80)
+    print(f"{'Steps':<8} {'Red Agent':<12} {'Mean Reward':<15} {'Std':<10} {'Win Rate':<10}")
+    print("-"*80)
+
+    for num_steps in steps_list:
+        for red_policy in red_policies:
+            m = results[num_steps][red_policy]
+            print(f"{num_steps:<8} {red_policy:<12} {m['mean_reward']:<15.2f} "
+                  f"{m['std_reward']:<10.2f} {m['win_rate']:<10.2%}")
+
+    print("="*80)
+
+    # Save results
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    result_file = save_path / f"eval_summary_{mode}_{timestamp}.json"
+
+    with open(result_file, "w") as f:
+        # Convert to serializable format
+        serializable_results = {}
+        for steps in results:
+            serializable_results[steps] = {}
+            for red in results[steps]:
+                serializable_results[steps][red] = {
+                    k: float(v) if isinstance(v, (np.floating, np.integer)) else v
+                    for k, v in results[steps][red].items()
+                }
+        json.dump(serializable_results, f, indent=2)
+
+    print(f"\nResults saved to {result_file}")
+
+    return results
+
+
 if __name__ == "__main__":
     import argparse
+    import time
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, required=True, help="Path to trained MAPPO model")
     parser.add_argument("--mode", type=str, default="ctde", choices=["ippo", "ctde"])
-    parser.add_argument("--red", type=str, default="bline", choices=["bline", "meander"])
+    parser.add_argument("--red", type=str, default=None, help="Red agent (if None, test all)")
+    parser.add_argument("--steps", type=int, default=None, help="Max steps (if None, test [30,50,100])")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--save-dir", type=str, default="./evaluation_results")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--multi-config", action="store_true", help="Test multiple configurations")
 
     args = parser.parse_args()
 
-    # Create environment
-    if args.mode == "ctde":
-        env = MultiAgentCageCTDE(
-            num_agents=NUM_SUBNETS,
-            red_policy=args.red,
-            remove_bugs=True,
-            max_steps=100,
+    if args.multi_config:
+        # Multi-configuration evaluation (aligned with original)
+        steps_list = [30, 50, 100] if args.steps is None else [args.steps]
+        red_policies = ["bline", "meander"] if args.red is None else [args.red]
+
+        evaluate_multiple_configs(
+            model_path=args.model_path,
+            mode=args.mode,
+            num_episodes=args.episodes,
+            steps_list=steps_list,
+            red_policies=red_policies,
+            save_dir=args.save_dir,
+            device=args.device,
         )
     else:
-        env = MultiAgentCage(
+        # Single configuration evaluation
+        max_steps = args.steps if args.steps else 100
+        red_policy = args.red if args.red else "bline"
+
+        # Create environment
+        if args.mode == "ctde":
+            env = MultiAgentCageCTDE(
+                num_agents=NUM_SUBNETS,
+                red_policy=red_policy,
+                remove_bugs=True,
+                max_steps=max_steps,
+            )
+        else:
+            env = MultiAgentCage(
+                num_agents=NUM_SUBNETS,
+                red_policy=red_policy,
+                remove_bugs=True,
+                max_steps=max_steps,
+                mode="independent",
+                enable_communication=False,
+            )
+
+        # Load trainer
+        trainer = MAPPOTrainer(
+            env=env,
             num_agents=NUM_SUBNETS,
-            red_policy=args.red,
-            remove_bugs=True,
-            max_steps=100,
-            mode="independent",
-            enable_communication=False,  # IPPO模式无通信
+            mode=args.mode,
+            device=args.device,
         )
+        trainer.load(args.model_path)
 
-    # Load trainer
-    trainer = MAPPOTrainer(
-        env=env,
-        num_agents=NUM_SUBNETS,
-        mode=args.mode,
-        device=args.device,
-    )
-    trainer.load(args.model_path)
+        # Evaluate
+        evaluator = MultiAgentEvaluator(trainer, env, args.episodes, args.device)
+        metrics = evaluator.evaluate(red_policy=red_policy)
 
-    # Evaluate
-    evaluator = MultiAgentEvaluator(trainer, env, args.episodes, args.device)
-    metrics = evaluator.evaluate(red_policy=args.red)
+        # Print results in SB3-style table format
+        print("\n" + "-"*50)
+        print("| rollout/                |             |")
+        print(f"|    ep_len_mean          | {metrics['mean_length']:.1f}        |")
+        print(f"|    ep_rew_mean          | {metrics['mean_reward']:.1f}       |")
+        print("| eval/                   |             |")
+        print(f"|    win_rate             | {metrics['win_rate']:.2%}      |")
+        print(f"|    service_availability | {metrics['mean_service_availability']:.2%}      |")
+        print(f"|    compromised_hosts    | {metrics['mean_compromised_hosts']:.1f}        |")
+        print(f"|    red_success_rate     | {metrics['red_success_rate']:.2%}      |")
+        print("| adversary/              |             |")
+        print(f"|    red_policy           | {red_policy:<11} |")
+        print(f"|    num_episodes         | {args.episodes:<11} |")
+        print("-"*50)
 
-    print("\n" + "="*60)
-    print("Evaluation Results")
-    print("="*60)
-    print(f"Mean Reward:           {metrics['mean_reward']:.2f} ± {metrics['std_reward']:.2f}")
-    print(f"Win Rate (>-150):      {metrics['win_rate']:.1%}")
-    print(f"Service Availability:  {metrics['mean_service_availability']:.1%}")
-    print(f"Avg Compromised Hosts: {metrics['mean_compromised_hosts']:.1f}")
-    print(f"Red Success Rate:      {metrics['red_success_rate']:.1%}")
-    print(f"Blue Success Actions:  {metrics['blue_success_actions_per_episode']:.1f}/episode")
-    print("="*60)
-
-    # Generate report
-    evaluator.generate_report(args.save_dir)
+        # Generate report
+        evaluator.generate_report(args.save_dir)

@@ -167,3 +167,4 @@ ppo_mini_cage_tensorboard/
 doc/
 mappo_models/
 .DS_Store
+evaluation_results/

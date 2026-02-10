@@ -65,54 +65,120 @@ python mappo_training.py --mode ippo --timesteps 1000000 --red meander
 ### 安装依赖
 
 ```bash
-pip install numpy torch gymnasium matplotlib seaborn
-# 如果使用SB3基线对比
-pip install stable-baselines3
+pip install numpy torch gymnasium matplotlib seaborn stable-baselines3
 ```
 
-### 测试环境
+### 1. 测试环境
 
 ```bash
+# 测试多智能体框架
 python test_multi_agent.py
+
+# 测试单智能体环境
+python -c "from single_agent_gym_wrapper import MiniCageBlue; env = MiniCageBlue(); print('OK')"
 ```
 
-### 训练多智能体
+### 2. 训练模型
 
-```python
-from mappo_training import train_mappo
+**单智能体 (SB3)**:
+```bash
+python SB3_blue_training.py
+# 权重保存到: ppo_models/SB3_PPO_1000000/
+```
+
+**多智能体 (MAPPO)**:
+```bash
+# IPPO模式
+python quick_train_mappo.py --mode ippo --steps 1000000
 
 # CTDE模式
-train_mappo(
-    mode="ctde",
-    total_timesteps=1_000_000,
-    red_policy="bline",
-    save_dir="./mappo_models",
-)
+python quick_train_mappo.py --mode ctde --steps 1000000
+
+# 权重保存到: mappo_models/
 ```
 
-### 评估模型
+### 3. 评估对比
+
+#### 3.1 评估 SB3 单智能体（训练权重）
 
 ```bash
-python multi_agent_evaluation.py \
-    --model-path ./mappo_models/ctde_final.pt \
-    --mode ctde \
+python eval_sb3_model.py \
+    --model ./ppo_models/SB3_PPO_1000000/你的模型文件.zip \
     --red bline \
     --episodes 100
 ```
 
-### 对比单智能体 vs 多智能体
+#### 3.2 评估 MAPPO 多智能体（训练权重）
 
-```python
-from multi_agent_evaluation import evaluate_single_vs_multi
-
-results = evaluate_single_vs_multi(
-    single_agent_path="./ppo_models/single_agent.zip",
-    multi_agent_path="./mappo_models/ctde_final.pt",
-    num_episodes=50,
-)
+```bash
+python multi_agent_evaluation.py \
+    --model-path ./mappo_models/ippo_final.pt \
+    --mode ippo \
+    --red bline \
+    --episodes 100
 ```
 
-## 架构对比
+#### 3.3 原版规则基线（无训练权重）
+
+```bash
+# 在原版环境中运行
+cd Debugged_CybORG/CybORG
+python CybORG/Evaluation/evaluation.py
+
+# 快速测试（非交互式）
+python -c "
+from CybORG import CybORG
+from CybORG.Agents import B_lineAgent
+from CybORG.Agents.SimpleAgents.BlueReactAgent import BlueReactRestoreAgent
+import inspect
+
+path = str(inspect.getfile(CybORG))[:-10] + '/Shared/Scenarios/Scenario2.yaml'
+cyborg = CybORG(path, 'sim', agents={'Red': B_lineAgent})
+agent = BlueReactRestoreAgent()
+
+obs = cyborg.reset().observation
+total = 0
+for i in range(100):
+    action = agent.get_action(obs, cyborg.get_action_space('Blue'))
+    result = cyborg.step('Blue', action)
+    total += result.reward
+print(f'Reward: {total:.2f}')
+"
+```
+
+### 4. 评估输出格式
+
+所有评估脚本输出统一格式的结果：
+
+```
+--------------------------------------------------
+| rollout/                |             |
+|    ep_len_mean          | 100.0       |
+|    ep_rew_mean          | -102.4      |
+| eval/                   |             |
+|    service_availability | 100.00%     |
+| adversary/              |             |
+|    red_agent            | bline       |
+|    episodes             | 100         |
+--------------------------------------------------
+```
+
+**指标说明**:
+- `ep_rew_mean`: 平均回合奖励（越高越好，CybORG为负值）
+- `service_availability`: OpServer可用时间比例
+- 基线参考: React-Restore (-156), React-Decoy (-69), Sleep (-1141)
+
+## 方法对比
+
+### 训练 vs 规则
+
+| 类型 | 实现 | 权重 | 评估方式 | 典型奖励 |
+|-----|------|-----|---------|---------|
+| **原版规则** | 手工代码 | 无 | `evaluation.py` 或命令行 | -156 (React-Restore) |
+| **SB3单智能体** | 神经网络 | `.zip` | `eval_sb3_model.py` | ~-100 |
+| **MAPPO多智能体** | 神经网络 | `.pt` | `multi_agent_evaluation.py` | ~-100 |
+
+### 架构对比
 
 | 特性 | Single Agent (SB3) | IPPO | MAPPO (CTDE) | Hierarchical |
 |-----|-------------------|------|--------------|--------------|
@@ -127,14 +193,28 @@ results = evaluate_single_vs_multi(
 
 ```
 mini_CAGE/
-├── multi_agent_gym_wrapper.py   # 多智能体环境包装器
-├── hierarchical_agents.py        # 分层智能体架构
-├── mappo_training.py             # MAPPO训练框架
-├── multi_agent_evaluation.py     # 评估与可视化
-├── test_multi_agent.py           # 测试脚本
-├── single_agent_gym_wrapper.py   # 单智能体包装器（原始）
-├── SB3_blue_training.py          # SB3训练脚本（原始）
-└── README_MULTI_AGENT.md         # 本文档
+├── Core Implementation
+│   ├── minimal.py                  # MiniCAGE核心环境
+│   ├── single_agent_gym_wrapper.py # 单智能体Gym包装
+│   ├── multi_agent_gym_wrapper.py  # 多智能体Gym包装
+│   ├── test_agent.py               # 红/蓝Agent基类
+│   └── red_bline_agent.py          # B-line红方实现
+│
+├── Training
+│   ├── SB3_blue_training.py        # 单智能体训练(SB3)
+│   ├── mappo_training.py           # 多智能体训练(MAPPO)
+│   ├── quick_train_mappo.py        # 快速训练脚本
+│   └── hierarchical_agents.py      # 分层智能体架构
+│
+├── Evaluation
+│   ├── eval_sb3_model.py           # 评估SB3训练权重
+│   ├── multi_agent_evaluation.py   # 评估MAPPO训练权重
+│   └── test_multi_agent.py         # 框架测试
+│
+└── Documentation
+    ├── README_MULTI_AGENT.md       # 本文档
+    ├── IMPLEMENTATION_DETAILS.md   # 实现细节
+    └── TRAINING_ANALYSIS.md        # 训练分析
 ```
 
 ## 实验建议
