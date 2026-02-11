@@ -15,7 +15,6 @@ import os
 import sys
 import time
 import argparse
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any
@@ -37,10 +36,11 @@ from single_agent_gym_wrapper import MiniCageBlue
 # ═══════════════════════════════════════════════════════════════════════
 NUM_RUNS: int = 1
 TOTAL_TIMESTEPS: int = 1_000_000
-LEARNING_RATE: float = 0.002
+# Modern MARL best-practice hyperparameters (tuned for stability)
+LEARNING_RATE: float = 3e-4      # Lower LR for stability (was 0.002)
 GAMMA: float = 0.99
 CLIP_RANGE: float = 0.2
-N_EPOCHS: int = 6
+N_EPOCHS: int = 10               # More epochs (was 6)
 MAX_STEPS: int = 100
 
 USE_WANDB: bool = False
@@ -494,7 +494,7 @@ class HierarchicalPolicy(nn.Module):
 
         # Extract observation for selected host
         batch_size = obs.shape[0]
-        selected_host_obs = host_obs[selected_host + torch.arange(batch_size) * 13]
+        selected_host_obs = host_obs[selected_host + torch.arange(batch_size, device=obs.device) * 13]
 
         # Worker selects action for selected host
         action_logits, worker_value = self.worker(selected_host_obs, selected_host)
@@ -507,7 +507,7 @@ class HierarchicalPolicy(nn.Module):
         manager_action: Optional[torch.Tensor] = None,
         worker_action: Optional[torch.Tensor] = None,
         deterministic: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Get hierarchical actions and values.
 
@@ -524,6 +524,8 @@ class HierarchicalPolicy(nn.Module):
             worker_log_prob: Log prob of action selection [batch_size]
             manager_entropy: Host selection entropy [batch_size]
             worker_entropy: Action selection entropy [batch_size]
+            manager_value: Manager's value estimate [batch_size]
+            worker_value: Worker's value estimate [batch_size]
         """
         global_obs, host_obs = self.parse_observation(obs)
         batch_size = obs.shape[0]
@@ -537,7 +539,7 @@ class HierarchicalPolicy(nn.Module):
                 self.manager.get_action_and_value(global_obs, manager_action)
 
         # Extract observation for selected host
-        selected_host_obs = host_obs[manager_action + torch.arange(batch_size) * 13]
+        selected_host_obs = host_obs[manager_action + torch.arange(batch_size, device=obs.device) * 13]
 
         # Worker selects action
         if worker_action is None:
@@ -554,6 +556,8 @@ class HierarchicalPolicy(nn.Module):
             worker_log_prob,
             manager_entropy,
             worker_entropy,
+            manager_value.squeeze(-1),
+            worker_value.squeeze(-1),
         )
 
     def convert_to_env_action(
@@ -733,10 +737,9 @@ class MAPPOTrainer:
         # Optimizer for both manager and worker
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
 
-        # Learning rate scheduler (linear decay like SB3)
-        self.lr_scheduler = None
         self.num_timesteps = 0
         self.total_timesteps = TOTAL_TIMESTEPS  # Will be updated in training loop
+        self.initial_lr = lr  # Store initial LR for scheduling
 
         # Training statistics
         self.stats = {
@@ -751,9 +754,9 @@ class MAPPOTrainer:
 
     def update_lr_schedule(self, progress: float):
         """Update learning rate based on training progress (0 to 1)."""
-        if self.use_linear_lr_schedule and self.lr_scheduler is None:
-            # Manual LR update: lr = initial_lr * (1 - progress)
-            new_lr = self.lr * (1.0 - progress)
+        if self.use_linear_lr_schedule:
+            # Linear decay with floor at 10% of initial LR (prevents LR going to 0)
+            new_lr = self.initial_lr * max(0.1, 1.0 - progress * 0.9)
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = new_lr
             self.stats["learning_rate"] = new_lr
@@ -800,13 +803,13 @@ class MAPPOTrainer:
 
         return advantages, returns
 
-    def update(self, buffer: HierarchicalRolloutBuffer, next_obs: np.ndarray, progress: float = 0.0) -> Dict[str, float]:
+    def update(self, buffer: HierarchicalRolloutBuffer, last_obs: np.ndarray, progress: float = 0.0) -> Dict[str, float]:
         """
-        Update policy using PPO.
+        Update policy using PPO with separate manager and worker objectives.
 
         Args:
             buffer: Rollout buffer with collected data
-            next_obs: Next observation for value bootstrapping
+            last_obs: Last observation from rollout for value bootstrapping
             progress: Training progress (0.0 to 1.0) for LR schedule
 
         Returns:
@@ -818,10 +821,10 @@ class MAPPOTrainer:
         # Get data from buffer
         data = buffer.get()
 
-        # Compute next value for GAE
+        # Compute next value for GAE using manager's value network
         with torch.no_grad():
-            next_obs_tensor = torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0).to(self.device)
-            _, _, _, next_manager_value = self.policy(next_obs_tensor)
+            next_obs_tensor = torch.as_tensor(last_obs, dtype=torch.float32).unsqueeze(0).to(self.device)
+            next_manager_value = self.policy.manager.value(next_obs_tensor)
             next_value = next_manager_value.item()
 
         # Use manager values for advantage computation
@@ -862,9 +865,8 @@ class MAPPOTrainer:
                 batch_old_worker_log_probs = data["worker_log_probs"][batch_idx]
                 batch_advantages = advantages[batch_idx]
                 batch_returns = returns[batch_idx]
-                batch_old_manager_values = data["manager_values"][batch_idx]
 
-                # Forward pass
+                # Single forward pass - get actions, log probs, entropies, and values
                 (
                     manager_action,
                     worker_action,
@@ -872,40 +874,35 @@ class MAPPOTrainer:
                     worker_log_prob,
                     manager_entropy,
                     worker_entropy,
+                    manager_value,
+                    worker_value,
                 ) = self.policy.get_action_and_value(
                     batch_obs,
                     batch_manager_actions,
                     batch_worker_actions,
                 )
 
-                # Get current values
-                _, _, _, manager_value = self.policy(batch_obs)
-                manager_value = manager_value.squeeze(-1)
-
-                # Compute policy loss (combined manager and worker)
+                # Compute policy loss with SEPARATE manager and worker objectives
+                # This is key for hierarchical RL - don't multiply ratios
                 manager_ratio = torch.exp(manager_log_prob - batch_old_manager_log_probs)
                 worker_ratio = torch.exp(worker_log_prob - batch_old_worker_log_probs)
-                combined_ratio = manager_ratio * worker_ratio
 
-                # Clipped surrogate loss
-                surr1 = combined_ratio * batch_advantages
-                surr2 = torch.clamp(combined_ratio, 1 - self.clip_range, 1 + self.clip_range) * batch_advantages
-                policy_loss = -torch.min(surr1, surr2).mean()
+                # Manager PPO loss
+                manager_surr1 = manager_ratio * batch_advantages
+                manager_surr2 = torch.clamp(manager_ratio, 1 - self.clip_range, 1 + self.clip_range) * batch_advantages
+                manager_policy_loss = -torch.min(manager_surr1, manager_surr2).mean()
 
-                # Compute value loss (SB3-style clipped MSE)
-                # Unclipped value loss
-                value_loss_unclipped = nn.functional.mse_loss(manager_value, batch_returns)
+                # Worker PPO loss
+                worker_surr1 = worker_ratio * batch_advantages
+                worker_surr2 = torch.clamp(worker_ratio, 1 - self.clip_range, 1 + self.clip_range) * batch_advantages
+                worker_policy_loss = -torch.min(worker_surr1, worker_surr2).mean()
 
-                # Clipped value loss
-                value_pred_clipped = batch_old_manager_values + torch.clamp(
-                    manager_value - batch_old_manager_values,
-                    -self.clip_range,
-                    self.clip_range,
-                )
-                value_loss_clipped = nn.functional.mse_loss(value_pred_clipped, batch_returns)
+                # Combined policy loss (can weight differently if needed)
+                policy_loss = manager_policy_loss + worker_policy_loss
 
-                # Take the maximum (like SB3)
-                value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped)
+                # Compute value loss using simple MSE (not clipped) for stability
+                # Clipped value loss often causes issues in practice
+                value_loss = 0.5 * nn.functional.mse_loss(manager_value, batch_returns)
 
                 # Compute entropy loss (negative because we want to maximize entropy)
                 entropy_loss = -(manager_entropy.mean() + worker_entropy.mean())
@@ -921,12 +918,16 @@ class MAPPOTrainer:
 
                 # Statistics
                 with torch.no_grad():
-                    approx_kl = ((batch_old_manager_log_probs - manager_log_prob).mean() +
-                                (batch_old_worker_log_probs - worker_log_prob).mean()) / 2
-                    clip_fraction = ((combined_ratio - 1.0).abs() > self.clip_range).float().mean()
+                    approx_kl = ((batch_old_manager_log_probs - manager_log_prob).abs().mean() +
+                                (batch_old_worker_log_probs - worker_log_prob).abs().mean()) / 2
 
-                    # Explained variance of value function
-                    y_pred = batch_old_manager_values
+                    # Track clipping for both policies
+                    manager_clip_frac = ((manager_ratio - 1.0).abs() > self.clip_range).float().mean()
+                    worker_clip_frac = ((worker_ratio - 1.0).abs() > self.clip_range).float().mean()
+                    clip_fraction = (manager_clip_frac + worker_clip_frac) / 2
+
+                    # Explained variance using CURRENT value predictions (not old)
+                    y_pred = manager_value.detach()
                     y_true = batch_returns
                     var_y = torch.var(y_true)
                     explained_var = 1 - torch.var(y_true - y_pred) / (var_y + 1e-8)
@@ -939,7 +940,7 @@ class MAPPOTrainer:
                 total_explained_var += explained_var.item()
                 num_updates += 1
 
-            # KL Early Stopping (SB3 style)
+            # KL Early Stopping (check after each epoch)
             if self.target_kl is not None and total_approx_kl / num_updates > self.target_kl:
                 early_stopped = True
                 break
@@ -998,11 +999,11 @@ class HierarchicalMAPPOTrainer:
         gae_lambda: float = 0.95,
         clip_range: float = CLIP_RANGE,
         n_epochs: int = N_EPOCHS,
-        batch_size: int = 64,
+        batch_size: int = 256,           # Larger batch for stable gradients (was 64)
         value_coef: float = 0.5,
-        entropy_coef: float = 0.01,
+        entropy_coef: float = 0.05,       # Higher entropy for exploration (was 0.01)
         max_grad_norm: float = 0.5,
-        target_kl: float = 0.015,
+        target_kl: float = 0.02,          # Slightly higher KL threshold (was 0.015)
         hidden_dim: int = 128,
         device: torch.device = DEVICE,
         save_dir: Path = SAVE_DIR,
@@ -1096,17 +1097,19 @@ class HierarchicalMAPPOTrainer:
         self.episode_rewards = deque(maxlen=100)
         self.episode_lengths = deque(maxlen=100)
 
-    def collect_rollout(self) -> int:
+    def collect_rollout(self) -> Tuple[int, np.ndarray]:
         """
         Collect a rollout of experiences.
         Uses observation normalization for stable training.
 
         Returns:
             total_steps: Number of steps collected
+            last_obs: Last observation for GAE bootstrapping
         """
         obs, _ = self.env.reset()
         episode_reward = 0.0
         episode_length = 0
+        last_obs = obs.copy()
 
         # Collect observations for batch update of running statistics
         obs_buffer = []
@@ -1118,7 +1121,7 @@ class HierarchicalMAPPOTrainer:
                 obs_buffer.append(obs.copy())
 
             # Normalize observation for policy inference
-            if self.normalize_obs and len(obs_buffer) > 1:
+            if self.normalize_obs and self.obs_rms.count > 1:
                 obs_normalized = self.obs_rms.normalize(obs)
             else:
                 obs_normalized = obs
@@ -1126,7 +1129,7 @@ class HierarchicalMAPPOTrainer:
             # Convert observation to tensor
             obs_tensor = torch.as_tensor(obs_normalized, dtype=torch.float32).unsqueeze(0).to(self.device)
 
-            # Get actions from hierarchical policy
+            # Get actions from hierarchical policy (single forward pass)
             with torch.no_grad():
                 (
                     manager_action,
@@ -1135,15 +1138,15 @@ class HierarchicalMAPPOTrainer:
                     worker_log_prob,
                     _,
                     _,
+                    manager_value,
+                    worker_value,
                 ) = self.policy.get_action_and_value(obs_tensor)
 
                 # Convert to environment action
                 env_action = self.policy.convert_to_env_action(manager_action, worker_action)
 
-                # Get values
-                _, _, manager_value, _ = self.policy(obs_tensor)
-                manager_value = manager_value.squeeze(-1).item()
-                worker_value = manager_value  # Use same value for simplicity
+                manager_value = manager_value.item()
+                worker_value = worker_value.item()
 
             # Execute action
             manager_action_np = manager_action.cpu().numpy()[0]
@@ -1160,10 +1163,9 @@ class HierarchicalMAPPOTrainer:
 
             # Normalize reward for training (but log original reward)
             normalized_reward = reward
-            if self.normalize_rewards and len(reward_buffer) > 1:
+            if self.normalize_rewards and self.ret_rms.count > 1:
                 # Use simple scaling based on running std
-                if self.ret_rms.count > 1:
-                    normalized_reward = reward / (np.sqrt(self.ret_rms.var) + 1e-8)
+                normalized_reward = reward / (np.sqrt(self.ret_rms.var) + 1e-8)
 
             # Store transition (with normalized observation and reward)
             self.buffer.add(
@@ -1192,6 +1194,7 @@ class HierarchicalMAPPOTrainer:
                 episode_length = 0
             else:
                 obs = next_obs
+                last_obs = obs.copy()
 
         # Update running statistics with collected data
         if self.normalize_obs and len(obs_buffer) > 0:
@@ -1202,7 +1205,7 @@ class HierarchicalMAPPOTrainer:
             rewards_array = np.array(reward_buffer)
             self.ret_rms.update(rewards_array.reshape(-1, 1))
 
-        return self.n_rollout_steps
+        return self.n_rollout_steps, last_obs
 
     def train(self):
         """Main training loop."""
@@ -1218,20 +1221,19 @@ class HierarchicalMAPPOTrainer:
         while total_steps < self.total_timesteps:
             iteration += 1
 
-            # Collect rollout
-            steps = self.collect_rollout()
+            # Collect rollout and get last observation for bootstrapping
+            steps, last_obs = self.collect_rollout()
             total_steps += steps
 
-            # Get last observation for bootstrapping (with normalization)
-            obs, _ = self.env.reset()
-            if self.normalize_obs:
-                obs = self.obs_rms.normalize(obs)
+            # Normalize last observation for bootstrapping
+            if self.normalize_obs and self.obs_rms.count > 1:
+                last_obs = self.obs_rms.normalize(last_obs)
 
             # Calculate progress for LR schedule
             progress = total_steps / self.total_timesteps
 
             # Update policy
-            stats = self.trainer.update(self.buffer, obs, progress=progress)
+            stats = self.trainer.update(self.buffer, last_obs, progress=progress)
             self.buffer.clear()
 
             # Logging
@@ -1404,8 +1406,8 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=64,
-        help="Mini-batch size (default: 64)",
+        default=256,
+        help="Mini-batch size (default: 256)",
     )
     parser.add_argument(
         "--n-rollout-steps",
@@ -1422,8 +1424,8 @@ def parse_args():
     parser.add_argument(
         "--entropy-coef",
         type=float,
-        default=0.01,
-        help="Entropy loss coefficient (default: 0.01)",
+        default=0.05,
+        help="Entropy loss coefficient (default: 0.05)",
     )
     parser.add_argument(
         "--max-grad-norm",
@@ -1434,8 +1436,8 @@ def parse_args():
     parser.add_argument(
         "--target-kl",
         type=float,
-        default=0.015,
-        help="Target KL divergence for early stopping, 0 to disable (default: 0.015)",
+        default=0.02,
+        help="Target KL divergence for early stopping, 0 to disable (default: 0.02)",
     )
     parser.add_argument(
         "--no-lr-schedule",
