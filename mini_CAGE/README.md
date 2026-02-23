@@ -1,114 +1,168 @@
+# MiniCAGE: Simplified CAGE 2 CybORG Environment
 
-# Overview:
+`mini_CAGE` is a simplified version of the CAGE 2 CybORG environment with a focus on greater execution speed and parallelisable runs. This repository includes a complete **CTDE-MAPPO** implementation for autonomous cyber defense agent training.
 
-```mini_CAGE``` is simplified version of the CAGE 2 CybORG environment with a focus on greater execution speed and 
-the 
-added ability to perform parallelisable runs. 
+## Project Structure
 
-The package mimics the basic reinforcement learning components of the CAGE 2 CybORG environment (e.g. state-action 
-space, reward, etc.), but abstracts the bulky files and complex processes, resulting in a streamlined and more accessible framework that retains core functionalities.
-
-# Usage:
-
-The only package dependency is ```numpy``` and the environment follows the basic OpenAI gym API structure. A simple implementation is given below, in which the two pre-programmed agents (react-restore and meander) compete for 100 timesteps.
-
-```python
-
-from .mini_CAGE import (
-    SimplifiedCAGE, Meander_minimal, React_restore_minimal)
-
-# instantiate the environment
-env = SimplifiedCAGE(num_envs=1)
-state, info = env.reset()
-
-# instantiate  the agents 
-red_agent = Meander_minimal()
-blue_agent = React_restore_minimal() 
-
-for i in range(100):
-
-    # select the agent actions
-    blue_action = blue_agent.get_action(
-        observation=state['Blue'])
-    red_action = red_agent.get_action(
-        observation=state['Red']) 
-
-    # update the environment
-    state, reward, done, info = env.step(
-        blue_action=blue_action, red_action=red_action)
+```
+mini_CAGE/
+├── minimal.py                      # SimplifiedCAGE environment (13 hosts, 3 subnets)
+├── single_agent_gym_wrapper.py     # Gym wrapper (MiniCageBlue)
+├── entity_observation_wrapper.py   # Transformer encoder + action masking
+├── hierarchical_mappo.py           # CTDE-MAPPO algorithm (Actor + Critic)
+├── hierarchical_agents.py          # Manager-Worker hierarchical agents
+├── train_hierarchical_mappo.py     # Training script (1543 lines)
+├── baseline_agents.py              # RandomAgent + HeuristicAgent
+├── evaluate_baselines.py           # Baseline evaluation script
+├── SB3_blue_training.py            # Stable Baselines3 PPO baseline
+└── docs/
+    ├── PROJECT_STATUS.md           # Project status and roadmap
+    └── 毕设题目研究内容与意义说明.md  # Thesis proposal (Chinese)
 ```
 
-# State-action space:
+## Installation
 
-## Enhanced State and Action Space
+```bash
+# Create conda environment
+mamba create -n cyborg python=3.10
+mamba activate cyborg
 
-The state and action space has been expanded from the original CybORG implementation.
+# Install dependencies
+pip install numpy gymnasium torch stable-baselines3
+```
 
-- **Blue Agent Observation:**  
-  The blue agent's observation contains the state described in the [extended developer guide](README.md), along with supplementary scanning and decoy information.
-  
-  - **Scanning Information:**  
-    Encoded as a vector, its length equals the number of hosts in the network. The vector logs if a host has been scanned in previous iterations by either the red or green agent.  
-    - If a host is being scanned in the current timestep, the corresponding index is `2`.  
-    - If the host was scanned in prior timesteps, the index is `1`.  
-    - Otherwise, the index is `0`.  
-      
-    **Example:** In a network with three hosts, if `host0` was scanned in the last timestep and `host1` is being scanned in the current timestep, the vector would be `[1, 2, 0]`.
+## Quick Start
 
-  - **Decoy Information:**  
-    This is also represented as a vector, where each index shows the number of available decoys per host.  
-      
-    **Example:** If `host0`, `host1`, and `host2` have two, three, and zero available decoys, respectively, the vector would be `[2, 3, 0]`.
+### Basic Environment Usage
 
-## Simplified Action Space
+```python
+from single_agent_gym_wrapper import MiniCageBlue
 
-The action space has been streamlined from the original implementation.
+# Create environment with B-line attacker
+env = MiniCageBlue(red_policy="bline", max_steps=100)
+obs, _ = env.reset()
 
-- The actions **'sleep'**, **'restore'**, **'remove'**, and **'analyse'** are retained in this optimized version.
-- However, the individual **'decoy'** actions have been consolidated into a single action for each host. In this version:
-  - The decoy with the highest priority is deployed first, based on the strategy outlined in Table "Decoy Deployment Strategy" from the [extended developer guide](README.md).
-  - Subsequent calls to the decoy action will deploy decoys of progressively lower priority until no decoys remain.
+for _ in range(100):
+    action = env.action_space.sample()  # Random action
+    obs, reward, terminated, truncated, info = env.step(action)
+    if terminated or truncated:
+        break
+```
 
-# Comparison:
+### Baseline Agents
 
-The environment is based off of the most up to date version of [CAGE 2](https://github.com/cage-challenge/CybORG/tree/cage-challenge-2). The introduced modifications are listed as follows:
+```python
+from baseline_agents import RandomAgent, HeuristicAgent
 
-- **Red Agent Interface** - the environment can now be used to train both red and blue agents, having fixed the problems with the wrapper in original CAGE 2 implementation. 
+# Random agent (performance lower bound)
+random_agent = RandomAgent(num_actions=53)
 
-- **Removal of Redundant Emulation Code** - originally the environment was designed with the expectation of extending the simulator for emulation purposes, however this created redundant code for simulator and therefore has been removed to improve efficiency.
+# Heuristic agent (rule-based, prioritizes decoy deployment)
+heuristic_agent = HeuristicAgent()
 
-- **Wrappers** - the default state is given as a dictionary containing a vector for both the red and blue agent's observations. In this form it should be readily compatible with reinforcement learning agents.
+# Get action
+action = agent.get_action(observation)
+```
 
-- **Bug fixes** - the environment is kept faithful to the original and therefore includes the bugs present in the previous iteration, allowing for more direct comparison. However, the environment can also be run with the bugs removed. 
+### Evaluate Baselines
 
-## Speed:
+```bash
+# Run evaluation
+python evaluate_baselines.py --num_episodes 100 --red_policy bline
 
-The simplification and parallelisation of the CybORG environment significantly improves the environment execution 
-speed, resulting in almost 1000x acceleration improvement when run on a single CPU. 
+# Output:
+# Agent           |  Mean Reward |        Std
+# Random          |     -1702.63 |     593.65
+# Heuristic       |     -1053.08 |     891.31
+```
 
-| Number of Episodes | CAGE 2 Time (s) | Mini CAGE Time (s) | Improvement |
-| ------------------ | --------------- |----------------------| ----------- |
-| 1                  | 1.16            | 0.12                 | ~15x        |
-| 10                 | 7.52            | 0.12                 | ~65x        |
-| 100                | 113.62          | 0.13                 | ~950x       |
-| 1000               | 998.87          | 1.35                 | ~800x       |  
+### Train Hierarchical MAPPO
 
+```bash
+# Train with default settings
+python train_hierarchical_mappo.py
 
-## Performance:
+# Training converges in ~72 epochs
+# Reward: -126 → -72
+```
 
-To confirm the equivalence between the mini_CAGE environment and the CAGE 2 environment, reward was compared across 6 
-combinations of attacker-defender pairs over 500 episodes for 100 timesteps each. +/- indicates the standard error.
+## Environment Details
 
-| Attacker | Defender      | CAGE 2 Score | Mini CAGE Score |
-| -------- | ------------- | ------------ |-------------------|
-| B-Line   | React-Restore | -159 +/- 2   | -156 +/ 2         |
-| B-Line   | React-Decoy   | -69 +/- 2    | -68 +/- 2         |
-| B-Line   | Sleep         | -1141 +/- 1  | -1141 +/- 1       |
-| Meander  | React-Restore | -69 +/- 2    | -68 +/- 2         |  
-| Meander  | React-Decoy   | -61 +/- 1    | -63 +/- 1         |
-| Meander  | Sleep         | -1067 +/- 2  | -1067 +/- 1       |
+### Observation Space
 
+- **Shape:** `(78,)` or `(13, 6)` entity format
+- **Per-host features (6-dim):**
+  - `scan_detected`: Scan activity count
+  - `exploit_detected`: Exploit activity count
+  - `is_privileged`: Privileged access count
+  - `is_removed`: Removal count
+  - `scan_count`: Historical scan info
+  - `num_decoys`: Number of decoys placed
 
+### Action Space
 
+- **Type:** `Discrete(53)`
+- **Mapping:**
+  - `0`: sleep
+  - `1-13`: analyse(host_i)
+  - `14-26`: decoy(host_i)
+  - `27-39`: remove(host_i)
+  - `40-52`: restore(host_i)
 
+### Network Topology
 
+- **13 Hosts:** def, ent0-2, ophost0-2, opserv, user0-4
+- **3 Subnets:** Enterprise, Operational, User
+- **Red Policies:** B-line (fixed attack chain), Meander (random walk)
+
+## Baseline Performance (100 episodes, B-line)
+
+| Agent | Mean Reward | Std | Notes |
+|-------|-------------|-----|-------|
+| RandomAgent | -1702.63 | 593.65 | Random action selection |
+| HeuristicAgent | -1053.08 | 891.31 | Decoy-prioritized rules |
+| PPO-MLP | ~-80 | - | Stable Baselines3 |
+| Hierarchical-MAPPO | ~-72 | - | After 72 epochs training |
+
+## Key Features
+
+### CTDE-MAPPO Implementation
+- Centralized Training with Decentralized Execution
+- Critic uses global state, Actor uses local observation
+- GAE advantage estimation (γ=0.99, λ=0.95)
+
+### Hierarchical RL
+- Manager: Selects sub-goals (Investigate/Isolate/Restore/Decoy)
+- Worker: Executes atomic actions
+- Temporal abstraction reduces effective episode length
+
+### Transformer Encoder
+- Entity-based observation processing
+- Multi-head self-attention for host relationships
+- Position encoding for network topology
+
+### Training Stability
+- Observation normalization (RunningMeanStd)
+- Reward scaling
+- LayerNorm (instead of BatchNorm)
+- Gradient clipping (max_norm=0.5)
+- Learning rate annealing
+
+## References
+
+1. **MAPPO**: Yu et al., "The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games", NeurIPS 2022
+2. **CybORG++**: Emerson et al., "CybORG++: An Enhanced Gym for the Development of Autonomous Cyber Agents", 2024
+3. **CAGE 2**: [github.com/cage-challenge/CybORG](https://github.com/cage-challenge/CybORG/tree/cage-challenge-2)
+
+## Speed Comparison
+
+| Episodes | CAGE 2 (s) | MiniCAGE (s) | Speedup |
+|----------|------------|--------------|---------|
+| 1 | 1.16 | 0.12 | ~15x |
+| 10 | 7.52 | 0.12 | ~65x |
+| 100 | 113.62 | 0.13 | ~950x |
+| 1000 | 998.87 | 1.35 | ~800x |
+
+## License
+
+MIT License - See [LICENSE](../LICENSE)
