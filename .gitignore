@@ -163,6 +163,7 @@ cython_debug/
 ppo_mini_cage_tensorboard/
 ppo_models/
 docs/
+mini_CAGE/docs/
 hierarchical_mappo_models/
 hierarchical_mappo_tensorboard/
 .DS_Store

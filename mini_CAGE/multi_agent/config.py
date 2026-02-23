@@ -158,7 +158,7 @@ MAX_STEPS: int = 100
 
 # PPO
 BATCH_SIZE: int = 256
-ENTROPY_COEF: float = 0.05
+ENTROPY_COEF: float = 0.01  # Reduced from 0.05 - MAPPO recommends 0.001-0.01 for multi-agent
 VALUE_COEF: float = 0.5
 
 # Multi-agent specific

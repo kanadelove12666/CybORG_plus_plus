@@ -471,9 +471,11 @@ class MultiAgentMAPPOTrainer:
             'train/approx_kl': 0.0,
             'train/clip_fraction': 0.0,
             'train/explained_variance': 0.0,
+            'train/early_stop': 0.0,  # Track early stopping events
         })
 
         n_batches = 0
+        early_stopped = False
         total_samples = self.n_steps * self.n_envs
 
         # PPO update epochs
@@ -571,9 +573,23 @@ class MultiAgentMAPPOTrainer:
                 stats['train/approx_kl'] += total_kl / self.n_agents
                 stats['train/clip_fraction'] += total_clip_frac / self.n_agents
 
+                # Per-batch KL early stopping to prevent policy collapse
+                # Use Stable-Baselines3 default threshold of 0.015
+                if total_kl / self.n_agents > 0.015:
+                    early_stopped = True
+                    break  # Stop this epoch early
+
+            else:
+                continue  # Only executed if inner loop didn't break
+            break  # Break outer loop if inner loop broke
+
+        # Record early stopping
+        stats['train/early_stop'] = 1.0 if early_stopped else 0.0
+
         # Average statistics
         for key in stats:
-            stats[key] /= n_batches
+            if key != 'train/early_stop':  # Don't average the early_stop flag
+                stats[key] /= n_batches
 
         self.num_updates += 1
         self.buffer.clear()
