@@ -166,3 +166,5 @@ docs/
 hierarchical_mappo_models/
 hierarchical_mappo_tensorboard/
 .DS_Store
+mini_CAGE/multi_agent_mappo_models/
+mini_CAGE/multi_agent_tensorboard/
