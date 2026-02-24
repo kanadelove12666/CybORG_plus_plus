@@ -159,6 +159,8 @@ MAX_STEPS: int = 100
 # PPO
 BATCH_SIZE: int = 256
 ENTROPY_COEF: float = 0.01  # Reduced from 0.05 - MAPPO recommends 0.001-0.01 for multi-agent
+MIN_ENTROPY_COEF: float = 0.001  # Decay entropy for late-stage stability
+TARGET_KL: float = 0.012  # Slightly stricter than SB3 default to reduce policy drift
 VALUE_COEF: float = 0.5
 
 # Multi-agent specific
@@ -214,6 +216,8 @@ if __name__ == "__main__":
     print(f"  N Epochs: {N_EPOCHS}")
     print(f"  Batch Size: {BATCH_SIZE}")
     print(f"  Entropy Coef: {ENTROPY_COEF}")
+    print(f"  Min Entropy Coef: {MIN_ENTROPY_COEF}")
+    print(f"  Target KL: {TARGET_KL}")
 
     # Test action conversion
     print("\nAction Conversion Test:")

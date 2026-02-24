@@ -317,6 +317,7 @@ def train(args):
             print(f"| {'':<20} | {'fps':<12} | {fps:>12.0f} |")
             print(f"| {' train/ ':<20} | {'value_loss':<12} | {update_stats['train/value_loss']:>12.6f} |")
             print(f"| {'':<20} | {'entropy':<12} | {update_stats['train/entropy']:>12.4f} |")
+            print(f"| {'':<20} | {'entropy_coef':<12} | {update_stats['train/entropy_coef']:>12.6f} |")
             print(f"| {'':<20} | {'approx_kl':<12} | {update_stats['train/approx_kl']:>12.6f} |")
             print(f"| {'':<20} | {'clip_fraction':<12} | {update_stats['train/clip_fraction']:>12.4f} |")
 
@@ -334,6 +335,7 @@ def train(args):
                 trainer.writer.add_scalar("time/fps", fps, trainer.num_timesteps)
                 trainer.writer.add_scalar("train/value_loss", update_stats['train/value_loss'], trainer.num_timesteps)
                 trainer.writer.add_scalar("train/entropy", update_stats['train/entropy'], trainer.num_timesteps)
+                trainer.writer.add_scalar("train/entropy_coef", update_stats['train/entropy_coef'], trainer.num_timesteps)
                 trainer.writer.add_scalar("train/approx_kl", update_stats['train/approx_kl'], trainer.num_timesteps)
                 trainer.writer.add_scalar("train/clip_fraction", update_stats['train/clip_fraction'], trainer.num_timesteps)
 

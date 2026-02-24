@@ -315,25 +315,11 @@ class SimplifiedMultiAgentCAGE:
             if hasattr(self.red_agent, 'reset'):
                 self.red_agent.reset()
         else:
-            # Partial reset: only reset specified environments
-            # For SimplifiedCAGE, we need to reset the underlying state
-            sim_obs = self._last_sim_obs.copy()
-
-            # Reset step counters for specified environments
+            # Partial reset: only reset specified environments and keep others running.
+            # IMPORTANT: reset both simulator state and all internal episode-dependent caches.
             self.episode_steps[env_indices] = 0
-
-            # Reset underlying simulator state for specified environments
-            # This is a simplified partial reset - set state to initial values
-            for idx in env_indices:
-                self.sim.state[idx] = -np.ones(13 * 3)
-                self.sim.state[idx, 24:27] = np.array([0, 0, 1])  # user0 privileged
-                self.sim.impacted[idx] = np.zeros(13)
-                self.sim.current_processes[idx] = self.sim.default_exploits.copy()
-                self.sim.current_decoys[idx] = self.sim.default_decoys[0].copy()
-                self.sim.detection[idx] = np.zeros(13).astype(bool)
-
-            # Re-process state for observations
-            sim_obs = self._process_reset_state(env_indices)
+            self._partial_reset_sim(env_indices)
+            sim_obs = self._process_reset_state()
             info = self.sim._get_info()
 
         # Compute global summary
@@ -350,13 +336,35 @@ class SimplifiedMultiAgentCAGE:
 
         return agent_obs, info
 
-    def _process_reset_state(self, env_indices: np.ndarray) -> Dict:
+    def _partial_reset_sim(self, env_indices: np.ndarray):
+        """Reset simulator tensors for selected environments."""
+        for idx in env_indices:
+            self.sim.state[idx] = -np.ones(13 * 3)
+            self.sim.state[idx, 24:27] = np.array([0, 0, 1])  # user0 privileged
+            self.sim.impacted[idx] = np.zeros(13)
+            self.sim.current_processes[idx] = self.sim.default_exploits.copy()
+            self.sim.current_decoys[idx] = self.sim.default_decoys[idx].copy()
+            self.sim.detection[idx] = np.zeros(13, dtype=bool)
+            self.sim.host_exploits[idx] = -np.ones(13)
+            self.sim.femitter_placed[idx] = np.zeros(13, dtype=bool)
+            self.sim.blue_success[idx] = -1
+            self.sim.red_success[idx] = -1
+            self.sim.selected_exploit[idx] = -1
+
+            # Clear cached processed observations for reset envs only.
+            if self.sim.proc_states is not None:
+                self.sim.proc_states['Blue'][idx] = 0
+                self.sim.proc_states['Red'][idx] = 0
+
+    def _process_reset_state(self) -> Dict:
         """Process state after partial reset to get observations."""
-        # Re-process the state to get observations using the underlying sim
+        # Re-process the state to get observations using the underlying sim.
+        # Sync simulator cache to avoid stale episode memory leaking across resets.
         state = self.sim._process_state(
             state=self.sim.state,
             logged_decoys=self.sim.current_decoys
         )
+        self.sim.proc_states = state
         return state
 
     def step(

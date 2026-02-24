@@ -26,6 +26,8 @@ from .config import (
     N_EPOCHS,
     BATCH_SIZE,
     ENTROPY_COEF,
+    MIN_ENTROPY_COEF,
+    TARGET_KL,
     VALUE_COEF,
     MAX_GRAD_NORM,
     MESSAGE_COEF,
@@ -74,6 +76,8 @@ class MultiAgentMAPPOTrainer:
         n_epochs: int = N_EPOCHS,
         batch_size: int = BATCH_SIZE,
         entropy_coef: float = ENTROPY_COEF,
+        min_entropy_coef: float = MIN_ENTROPY_COEF,
+        target_kl: float = TARGET_KL,
         value_coef: float = VALUE_COEF,
         max_grad_norm: float = MAX_GRAD_NORM,
         message_coef: float = MESSAGE_COEF,
@@ -127,6 +131,8 @@ class MultiAgentMAPPOTrainer:
         self.n_epochs = n_epochs
         self.batch_size = batch_size
         self.entropy_coef = entropy_coef
+        self.min_entropy_coef = min_entropy_coef
+        self.target_kl = target_kl
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.message_coef = message_coef
@@ -175,6 +181,13 @@ class MultiAgentMAPPOTrainer:
         self.writer: Optional[SummaryWriter] = None
 
         os.makedirs(save_dir, exist_ok=True)
+
+    def _current_entropy_coef(self, progress: float) -> float:
+        """Linearly anneal entropy coefficient for late-stage policy stability."""
+        if self.entropy_coef <= self.min_entropy_coef:
+            return self.entropy_coef
+        ratio = max(0.0, min(1.0, progress))
+        return self.entropy_coef - (self.entropy_coef - self.min_entropy_coef) * ratio
 
     def _create_networks(self):
         """Create actor and critic networks."""
@@ -300,19 +313,27 @@ class MultiAgentMAPPOTrainer:
 
         episode_rewards = np.zeros(self.n_envs)
         episode_lengths = np.zeros(self.n_envs)
+        obs_for_rms = {agent_id: [] for agent_id in range(self.n_agents)}
+        rewards_for_rms = []
         # Track last obs/state for proper GAE bootstrapping
         last_obs = {i: agent_obs[i].copy() for i in range(self.n_agents)}
         last_global_state = global_state.copy()
         last_messages = messages.copy()
 
         for step in range(self.n_steps):
+            for agent_id in range(self.n_agents):
+                obs_for_rms[agent_id].append(agent_obs[agent_id].copy())
+
             # Normalize observations
             if self.normalize_obs:
                 normalized_obs = {}
                 for agent_id in range(self.n_agents):
-                    normalized_obs[agent_id] = self.obs_rms[agent_id].normalize(
-                        agent_obs[agent_id]
-                    )
+                    if self.obs_rms[agent_id].count > 1:
+                        normalized_obs[agent_id] = self.obs_rms[agent_id].normalize(
+                            agent_obs[agent_id]
+                        )
+                    else:
+                        normalized_obs[agent_id] = agent_obs[agent_id]
             else:
                 normalized_obs = agent_obs
 
@@ -343,10 +364,13 @@ class MultiAgentMAPPOTrainer:
             # Step environment
             next_agent_obs, reward, done, truncated, info = self.env.step(actions)
             done = done.astype(np.float32)
+            rewards_for_rms.append(reward.copy())
 
             # Normalize reward
             if self.normalize_reward and self.reward_rms.count > 1:
-                normalized_reward = self.reward_rms.normalize(reward.reshape(-1, 1)).flatten()
+                reward_scale = np.sqrt(self.reward_rms.var + 1e-8)
+                normalized_reward = reward / reward_scale
+                normalized_reward = np.clip(normalized_reward, -10.0, 10.0)
             else:
                 normalized_reward = reward
 
@@ -391,13 +415,15 @@ class MultiAgentMAPPOTrainer:
             last_global_state = global_state.copy()
             last_messages = messages.copy()
 
-        # Update running statistics
-        self.buffer.update_running_stats()
-        for agent_id, rms in self.buffer.obs_rms.items():
-            self.obs_rms[agent_id].mean = rms.mean
-            self.obs_rms[agent_id].var = rms.var
-            self.obs_rms[agent_id].count = rms.count
-        self.reward_rms = self.buffer.reward_rms
+        # Update running statistics with RAW observations/rewards (not normalized data).
+        if self.normalize_obs:
+            for agent_id in range(self.n_agents):
+                if obs_for_rms[agent_id]:
+                    raw_obs = np.concatenate(obs_for_rms[agent_id], axis=0)
+                    self.obs_rms[agent_id].update(raw_obs)
+        if self.normalize_reward and rewards_for_rms:
+            raw_rewards = np.concatenate(rewards_for_rms, axis=0).reshape(-1, 1)
+            self.reward_rms.update(raw_rewards)
 
         self.num_timesteps += self.n_steps * self.n_envs
 
@@ -440,6 +466,7 @@ class MultiAgentMAPPOTrainer:
         # Update learning rate
         if self.use_linear_lr_schedule:
             self._update_lr_schedule(progress)
+        current_entropy_coef = self._current_entropy_coef(progress)
 
         # Get last values for GAE using the ACTUAL last state (not buffer[-1])
         with torch.no_grad():
@@ -468,6 +495,7 @@ class MultiAgentMAPPOTrainer:
         stats.update({
             'train/value_loss': 0.0,
             'train/entropy': 0.0,
+            'train/entropy_coef': current_entropy_coef,
             'train/approx_kl': 0.0,
             'train/clip_fraction': 0.0,
             'train/explained_variance': 0.0,
@@ -545,7 +573,7 @@ class MultiAgentMAPPOTrainer:
                     policy_loss = -torch.min(surr1, surr2).mean()
 
                     # Total loss
-                    loss = policy_loss - self.entropy_coef * entropy.mean()
+                    loss = policy_loss - current_entropy_coef * entropy.mean()
 
                     # Update
                     self.actor_optimizers[agent_id].zero_grad()
@@ -574,8 +602,7 @@ class MultiAgentMAPPOTrainer:
                 stats['train/clip_fraction'] += total_clip_frac / self.n_agents
 
                 # Per-batch KL early stopping to prevent policy collapse
-                # Use Stable-Baselines3 default threshold of 0.015
-                if total_kl / self.n_agents > 0.015:
+                if total_kl / self.n_agents > self.target_kl:
                     early_stopped = True
                     break  # Stop this epoch early
 
