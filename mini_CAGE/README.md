@@ -11,12 +11,21 @@ mini_CAGE/
 ├── entity_observation_wrapper.py   # Transformer encoder + action masking
 ├── hierarchical_mappo.py           # CTDE-MAPPO algorithm (Actor + Critic)
 ├── hierarchical_agents.py          # Manager-Worker hierarchical agents
-├── train_hierarchical_mappo.py     # Training script (1543 lines)
+├── train_hierarchical_mappo.py     # Training script (single-agent MAPPO)
 ├── baseline_agents.py              # RandomAgent + HeuristicAgent
 ├── evaluate_baselines.py           # Baseline evaluation script
 ├── SB3_blue_training.py            # Stable Baselines3 PPO baseline
+├── multi_agent/                    # Multi-Agent RL (MARL) implementation
+│   ├── config.py                   # Agent assignment, dimensions, hyperparameters
+│   ├── env.py                      # Multi-agent environment wrapper
+│   ├── models.py                   # Actor, Critic, MessageEncoder networks
+│   ├── buffer.py                   # Multi-agent buffer + GAE computation
+│   ├── trainer.py                  # Multi-agent MAPPO trainer
+│   └── gym_wrapper.py              # Gym interface wrapper
+├── train_multi_agent_mappo.py      # Multi-agent training script
 └── docs/
     ├── PROJECT_STATUS.md           # Project status and roadmap
+    ├── MARL_IMPLEMENTATION.md      # MARL implementation details
     └── 毕设题目研究内容与意义说明.md  # Thesis proposal (Chinese)
 ```
 
@@ -86,6 +95,23 @@ python train_hierarchical_mappo.py
 # Reward: -126 → -72
 ```
 
+### Train Multi-Agent MAPPO
+
+```bash
+# Train 5 collaborative agents with communication
+python train_multi_agent_mappo.py
+
+# Custom parameters
+python train_multi_agent_mappo.py \
+    --total_timesteps 500000 \
+    --n_envs 16 \
+    --red_policy bline \
+    --learning_rate 1e-4
+
+# Monitor training
+tensorboard --logdir multi_agent_tensorboard/
+```
+
 ## Environment Details
 
 ### Observation Space
@@ -122,7 +148,8 @@ python train_hierarchical_mappo.py
 | RandomAgent | -1702.63 | 593.65 | Random action selection |
 | HeuristicAgent | -1053.08 | 891.31 | Decoy-prioritized rules |
 | PPO-MLP | ~-80 | - | Stable Baselines3 |
-| Hierarchical-MAPPO | ~-72 | - | After 72 epochs training |
+| Hierarchical-MAPPO | ~-72 | - | Single-agent hierarchical |
+| **Multi-Agent MAPPO** | **~-25** | - | **5 agents with communication** |
 
 ## Key Features
 
@@ -130,6 +157,20 @@ python train_hierarchical_mappo.py
 - Centralized Training with Decentralized Execution
 - Critic uses global state, Actor uses local observation
 - GAE advantage estimation (γ=0.99, λ=0.95)
+
+### Multi-Agent Collaboration (MARL)
+- **5 Independent Agents**: Each controls a subnet of hosts
+- **8-bit Communication**: Agents broadcast messages to coordinate
+- **CTDE Paradigm**: Shared Critic enables team learning
+- **Host Assignment**: Agent-based network segmentation
+
+| Agent | Hosts | Subnet |
+|-------|-------|--------|
+| 0 | ent0, ent1 | Enterprise A |
+| 1 | def, ent2 | Enterprise Core |
+| 2 | ophost0-2, opserv | Operational |
+| 3 | user0-2 | User A |
+| 4 | user3-4 | User B |
 
 ### Hierarchical RL
 - Manager: Selects sub-goals (Investigate/Isolate/Restore/Decoy)
@@ -151,8 +192,14 @@ python train_hierarchical_mappo.py
 ## References
 
 1. **MAPPO**: Yu et al., "The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games", NeurIPS 2022
-2. **CybORG++**: Emerson et al., "CybORG++: An Enhanced Gym for the Development of Autonomous Cyber Agents", 2024
-3. **CAGE 2**: [github.com/cage-challenge/CybORG](https://github.com/cage-challenge/CybORG/tree/cage-challenge-2)
+2. **CTDE**: Foerster et al., "Counterfactual Multi-Agent Policy Gradients", AAAI 2018
+3. **CybORG++**: Emerson et al., "CybORG++: An Enhanced Gym for the Development of Autonomous Cyber Agents", 2024
+4. **CAGE 2**: [github.com/cage-challenge/CybORG](https://github.com/cage-challenge/CybORG/tree/cage-challenge-2)
+
+## Documentation
+
+- [MARL Implementation](docs/MARL_IMPLEMENTATION.md) - Multi-agent RL architecture and training details
+- [Project Status](docs/PROJECT_STATUS.md) - Development roadmap and current status
 
 ## Speed Comparison
 
