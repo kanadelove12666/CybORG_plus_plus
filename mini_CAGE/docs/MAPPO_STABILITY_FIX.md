@@ -221,3 +221,47 @@ LEARNING_RATE = 3e-4       # 标准
 *文档创建: 2026-02-24*
 *第一轮修复验证: 100K步训练成功*
 *第二轮修复验证: 10K步流程与稳定性检查通过*
+
+---
+
+## 9. 第三轮结构稳定化（2026-02-24）
+
+> 背景: 第二轮后仍有“中后期抖动”现象，典型表现为 `ep_rew_std` 阶段性升高后回落。
+
+### 9.1 新增根因定位
+
+| 优先级 | 问题 | 位置 | 影响 |
+|--------|------|------|------|
+| **P0** | 执行动作与更新对象不一致 | `multi_agent/env.py`, `multi_agent/trainer.py` | 每步只执行一个agent动作，但所有agent都按共享advantage更新，信用分配噪声大 |
+| **P0** | 动作掩码未进入完整训练链路 | `multi_agent/trainer.py`, `multi_agent/buffer.py` | 采样/训练可能包含无效动作，增加方差 |
+| **P1** | 缺少“谁在执行/谁在更新”的可视化 | `train_multi_agent_mappo.py` | 训练异常难以快速定位 |
+
+### 9.2 修复措施
+
+1. **执行者信用分配 (Executed-Agent Credit Assignment)**
+   - 环境返回每步执行者掩码 `executed_agent_mask`（形状 `n_envs × n_agents`）
+   - Actor更新时按掩码加权PPO目标，默认只对执行者回传梯度：
+   - `NON_EXECUTED_WEIGHT = 0.0`（可调参数）
+
+2. **动作掩码全链路接入**
+   - rollout采样使用 `env.get_action_mask(agent_id)` 约束动作分布
+   - buffer新增 `action_masks` 存储
+   - update时 `evaluate_actions(..., action_mask=...)` 使用同一掩码
+
+3. **可视化与诊断指标增强**
+   - 新增 `train/non_executed_weight`
+   - 新增 `rollout/agent_i_executed_ratio`
+   - 新增 `rollout/agent_i_invalid_action_rate`
+   - 新增 `rollout/agent_i_mask_available_ratio`
+
+### 9.3 验证结果
+
+- `py_compile` 通过（所有修改文件）
+- 短程训练 smoke test 通过（`1024 steps`）
+- 新增指标输出正常，`invalid_action_rate` 为 0（动作掩码链路生效）
+
+### 9.4 当前状态
+
+- 训练已“基本稳定”并可持续收敛
+- 剩余波动主要来自环境仲裁策略本身（当前为“第一个非sleep动作优先”），属于结构特性而非数值崩溃
+- 下一步可选优化是将动作仲裁从固定优先级升级为可配置策略（如 round-robin / random priority）

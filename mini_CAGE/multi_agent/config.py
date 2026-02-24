@@ -162,6 +162,7 @@ ENTROPY_COEF: float = 0.01  # Reduced from 0.05 - MAPPO recommends 0.001-0.01 fo
 MIN_ENTROPY_COEF: float = 0.001  # Decay entropy for late-stage stability
 TARGET_KL: float = 0.012  # Slightly stricter than SB3 default to reduce policy drift
 VALUE_COEF: float = 0.5
+NON_EXECUTED_WEIGHT: float = 0.0  # 0.0 = executed-agent-only credit assignment
 
 # Multi-agent specific
 MESSAGE_COEF: float = 0.1  # Message regularization coefficient
@@ -218,6 +219,7 @@ if __name__ == "__main__":
     print(f"  Entropy Coef: {ENTROPY_COEF}")
     print(f"  Min Entropy Coef: {MIN_ENTROPY_COEF}")
     print(f"  Target KL: {TARGET_KL}")
+    print(f"  Non-executed weight: {NON_EXECUTED_WEIGHT}")
 
     # Test action conversion
     print("\nAction Conversion Test:")

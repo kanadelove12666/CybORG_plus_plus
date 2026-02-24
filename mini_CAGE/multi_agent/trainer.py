@@ -29,6 +29,7 @@ from .config import (
     MIN_ENTROPY_COEF,
     TARGET_KL,
     VALUE_COEF,
+    NON_EXECUTED_WEIGHT,
     MAX_GRAD_NORM,
     MESSAGE_COEF,
     GLOBAL_SUMMARY_DIM,
@@ -79,6 +80,7 @@ class MultiAgentMAPPOTrainer:
         min_entropy_coef: float = MIN_ENTROPY_COEF,
         target_kl: float = TARGET_KL,
         value_coef: float = VALUE_COEF,
+        non_executed_weight: float = NON_EXECUTED_WEIGHT,
         max_grad_norm: float = MAX_GRAD_NORM,
         message_coef: float = MESSAGE_COEF,
         device: Optional[torch.device] = None,
@@ -107,6 +109,7 @@ class MultiAgentMAPPOTrainer:
             batch_size: Mini-batch size
             entropy_coef: Entropy coefficient
             value_coef: Value loss coefficient
+            non_executed_weight: Policy-loss weight for non-executed agents
             max_grad_norm: Gradient clipping norm
             message_coef: Message regularization coefficient
             device: Torch device
@@ -134,6 +137,7 @@ class MultiAgentMAPPOTrainer:
         self.min_entropy_coef = min_entropy_coef
         self.target_kl = target_kl
         self.value_coef = value_coef
+        self.non_executed_weight = non_executed_weight
         self.max_grad_norm = max_grad_norm
         self.message_coef = message_coef
         self.use_linear_lr_schedule = use_linear_lr_schedule
@@ -230,6 +234,7 @@ class MultiAgentMAPPOTrainer:
     def select_actions(
         self,
         agent_obs: Dict[int, np.ndarray],
+        action_masks: Dict[int, np.ndarray],
         global_state: np.ndarray,
         messages: np.ndarray,
         deterministic: bool = False
@@ -239,6 +244,7 @@ class MultiAgentMAPPOTrainer:
 
         Args:
             agent_obs: Observations for each agent
+            action_masks: Action masks for each agent
             global_state: Global state for critic
             messages: Current messages
             deterministic: Whether to use deterministic actions
@@ -259,6 +265,9 @@ class MultiAgentMAPPOTrainer:
                 obs = torch.as_tensor(
                     agent_obs[agent_id], device=self.device, dtype=torch.float32
                 )
+                action_mask = torch.as_tensor(
+                    action_masks[agent_id], device=self.device, dtype=torch.float32
+                )
 
                 # Split observation into components
                 local_obs_dim = (
@@ -275,11 +284,12 @@ class MultiAgentMAPPOTrainer:
                     logits = self.actors[str(agent_id)](
                         local_obs, global_summary, received_messages
                     )
+                    logits = logits.masked_fill(action_mask == 0, float('-inf'))
                     action = logits.argmax(dim=-1)
                     log_prob = torch.zeros(action.shape[0], device=self.device)
                 else:
                     action, log_prob, _, message = self.actors[str(agent_id)].get_action_and_log_prob(
-                        local_obs, global_summary, received_messages
+                        local_obs, global_summary, received_messages, action_mask=action_mask
                     )
                     new_messages[agent_id] = message.cpu().numpy()
 
@@ -315,6 +325,10 @@ class MultiAgentMAPPOTrainer:
         episode_lengths = np.zeros(self.n_envs)
         obs_for_rms = {agent_id: [] for agent_id in range(self.n_agents)}
         rewards_for_rms = []
+        executed_counts = np.zeros(self.n_agents, dtype=np.float64)
+        invalid_action_counts = np.zeros(self.n_agents, dtype=np.float64)
+        total_action_counts = np.zeros(self.n_agents, dtype=np.float64)
+        mask_available_sum = np.zeros(self.n_agents, dtype=np.float64)
         # Track last obs/state for proper GAE bootstrapping
         last_obs = {i: agent_obs[i].copy() for i in range(self.n_agents)}
         last_global_state = global_state.copy()
@@ -337,18 +351,32 @@ class MultiAgentMAPPOTrainer:
             else:
                 normalized_obs = agent_obs
 
+            # Action masks are generated from the current simulator state
+            action_masks = {}
+            for agent_id in range(self.n_agents):
+                action_masks[agent_id] = self.env.get_action_mask(agent_id).astype(np.float32)
+                mask_available_sum[agent_id] += float(action_masks[agent_id].mean())
+
             # Select actions
             actions, log_probs, value, new_messages = self.select_actions(
-                normalized_obs, global_state, messages
+                normalized_obs, action_masks, global_state, messages
             )
+
+            # Rollout diagnostics: invalid sampled actions under current mask
+            for agent_id in range(self.n_agents):
+                valid = action_masks[agent_id][np.arange(self.n_envs), actions[agent_id]] > 0.5
+                invalid_action_counts[agent_id] += float((~valid).sum())
+                total_action_counts[agent_id] += float(self.n_envs)
 
             # Store transition
             self.buffer.store(
                 agent_obs=normalized_obs,
                 agent_actions=actions,
                 agent_log_probs=log_probs,
+                agent_action_masks=action_masks,
                 global_state=global_state,
                 messages=messages,
+                executed_mask=np.zeros((self.n_envs, self.n_agents), dtype=np.float32),  # Filled after env.step
                 reward=np.zeros(self.n_envs),  # Will be filled after step
                 value=value,
                 done=np.zeros(self.n_envs)  # Will be filled after step
@@ -365,6 +393,11 @@ class MultiAgentMAPPOTrainer:
             next_agent_obs, reward, done, truncated, info = self.env.step(actions)
             done = done.astype(np.float32)
             rewards_for_rms.append(reward.copy())
+            executed_mask = info.get(
+                'executed_agent_mask',
+                np.zeros((self.n_envs, self.n_agents), dtype=np.float32)
+            ).astype(np.float32)
+            executed_counts += executed_mask.sum(axis=0)
 
             # Normalize reward
             if self.normalize_reward and self.reward_rms.count > 1:
@@ -377,6 +410,7 @@ class MultiAgentMAPPOTrainer:
             # Update reward and done in buffer
             self.buffer.rewards[step] = normalized_reward
             self.buffer.dones[step] = done
+            self.buffer.executed_masks[step] = executed_mask
 
             # Track episode statistics
             episode_rewards += reward
@@ -430,6 +464,18 @@ class MultiAgentMAPPOTrainer:
         stats = {
             'episode_rewards': self.episode_rewards[-100:] if self.episode_rewards else [0],
             'episode_lengths': self.episode_lengths[-100:] if self.episode_lengths else [0],
+            'executed_ratio': {
+                agent_id: float(executed_counts[agent_id] / (self.n_steps * self.n_envs))
+                for agent_id in range(self.n_agents)
+            },
+            'invalid_action_rate': {
+                agent_id: float(invalid_action_counts[agent_id] / max(total_action_counts[agent_id], 1.0))
+                for agent_id in range(self.n_agents)
+            },
+            'mask_available_ratio': {
+                agent_id: float(mask_available_sum[agent_id] / self.n_steps)
+                for agent_id in range(self.n_agents)
+            },
         }
 
         # Normalize last_obs for bootstrapping
@@ -496,6 +542,7 @@ class MultiAgentMAPPOTrainer:
             'train/value_loss': 0.0,
             'train/entropy': 0.0,
             'train/entropy_coef': current_entropy_coef,
+            'train/non_executed_weight': self.non_executed_weight,
             'train/approx_kl': 0.0,
             'train/clip_fraction': 0.0,
             'train/explained_variance': 0.0,
@@ -550,6 +597,9 @@ class MultiAgentMAPPOTrainer:
                     batch_obs = data['agents'][agent_id]['obs'][batch_idx]
                     batch_actions = data['agents'][agent_id]['actions'][batch_idx]
                     batch_old_log_probs = data['agents'][agent_id]['log_probs'][batch_idx]
+                    batch_action_masks = data['agents'][agent_id]['action_masks'][batch_idx]
+                    batch_executed = data['shared']['executed_masks'][batch_idx, agent_id]
+                    batch_weights = batch_executed + (1.0 - batch_executed) * self.non_executed_weight
 
                     # Split observation
                     local_obs_dim = (
@@ -563,17 +613,23 @@ class MultiAgentMAPPOTrainer:
 
                     # Evaluate actions
                     log_probs, entropy = self.actors[str(agent_id)].evaluate_actions(
-                        local_obs, global_summary, received_messages, batch_actions
+                        local_obs, global_summary, received_messages, batch_actions, action_mask=batch_action_masks
                     )
 
                     # PPO loss
                     ratio = torch.exp(log_probs - batch_old_log_probs)
                     surr1 = ratio * batch_advantages
                     surr2 = torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range) * batch_advantages
-                    policy_loss = -torch.min(surr1, surr2).mean()
+                    surr = torch.min(surr1, surr2)
+                    weight_sum = batch_weights.sum()
+                    if weight_sum.item() < 1e-8:
+                        stats[f'agent_{agent_id}/policy_loss'] += 0.0
+                        continue
+                    policy_loss = -(surr * batch_weights).sum() / (weight_sum + 1e-8)
+                    entropy_mean = (entropy * batch_weights).sum() / (weight_sum + 1e-8)
 
                     # Total loss
-                    loss = policy_loss - current_entropy_coef * entropy.mean()
+                    loss = policy_loss - current_entropy_coef * entropy_mean
 
                     # Update
                     self.actor_optimizers[agent_id].zero_grad()
@@ -586,13 +642,18 @@ class MultiAgentMAPPOTrainer:
 
                     # Statistics
                     stats[f'agent_{agent_id}/policy_loss'] += policy_loss.item()
-                    total_entropy += entropy.mean().item()
+                    total_entropy += entropy_mean.item()
 
                     with torch.no_grad():
-                        kl = ((ratio - 1) - torch.log(ratio + 1e-8)).mean().item()
-                        clip_frac = (
+                        kl_per_sample = ((ratio - 1) - torch.log(ratio + 1e-8))
+                        kl = ((kl_per_sample * batch_weights).sum() / (weight_sum + 1e-8)).item()
+                        clip_indicator = (
                             ((ratio > 1 + self.clip_range) | (ratio < 1 - self.clip_range))
-                            .float().mean().item()
+                            .float()
+                        )
+                        clip_frac = ((clip_indicator * batch_weights).sum() / (weight_sum + 1e-8)).item()
+                        clip_frac = (
+                            clip_frac
                         )
                         total_kl += kl
                         total_clip_frac += clip_frac
@@ -615,7 +676,9 @@ class MultiAgentMAPPOTrainer:
 
         # Average statistics
         for key in stats:
-            if key != 'train/early_stop':  # Don't average the early_stop flag
+            if key in {'train/early_stop', 'train/entropy_coef', 'train/non_executed_weight'}:
+                continue
+            else:
                 stats[key] /= n_batches
 
         self.num_updates += 1
@@ -702,6 +765,10 @@ if __name__ == "__main__":
         def get_global_state(self):
             return np.random.randn(self.n_envs, 65)
 
+        def get_action_mask(self, agent_id):
+            action_dim = 5 + agent_id * 2
+            return np.ones((self.n_envs, action_dim), dtype=np.float32)
+
     env = MockEnv()
     obs_dims = {i: 50 + i * 5 for i in range(5)}
     action_dims = {i: 5 + i * 2 for i in range(5)}
@@ -727,9 +794,10 @@ if __name__ == "__main__":
     agent_obs, _ = env.reset()
     global_state = env.get_global_state()
     messages = np.zeros((env.n_envs, 40), dtype=np.float32)
+    action_masks = {i: env.get_action_mask(i) for i in range(5)}
 
     actions, log_probs, value, new_messages = trainer.select_actions(
-        agent_obs, global_state, messages
+        agent_obs, action_masks, global_state, messages
     )
     print(f"  Actions: {actions[0].shape}")
     print(f"  Value: {value.shape}")

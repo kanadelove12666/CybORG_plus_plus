@@ -86,6 +86,18 @@ global_state = concat([true_state, decoy_info, impact_info])  # 65维
 value = CentralizedCritic(global_state, all_messages)
 ```
 
+#### 1.4.4 执行者信用分配与动作掩码（2026-02-24）
+
+为降低中后期训练波动，新增两项关键机制：
+
+- **执行者信用分配**：环境输出 `executed_agent_mask`，actor更新时按执行者掩码加权；默认仅执行者回传梯度。
+- **动作掩码全链路接入**：采样与训练评估均使用同一 action mask，避免无效动作带来的梯度噪声。
+
+新增可视化指标：
+- `rollout/agent_i_executed_ratio`
+- `rollout/agent_i_invalid_action_rate`
+- `rollout/agent_i_mask_available_ratio`
+
 ---
 
 ## 2. 实现中遇到的问题
@@ -209,7 +221,9 @@ N_EPOCHS = 10
 N_ENVS = 8
 N_STEPS = 128
 BATCH_SIZE = 256
-ENTROPY_COEF = 0.05
+ENTROPY_COEF = 0.01
+MIN_ENTROPY_COEF = 0.001
+TARGET_KL = 0.012
 VALUE_COEF = 0.5
 MAX_GRAD_NORM = 0.5
 
@@ -217,6 +231,7 @@ MAX_GRAD_NORM = 0.5
 N_AGENTS = 5
 MESSAGE_BITS = 8
 MESSAGE_COEF = 0.1
+NON_EXECUTED_WEIGHT = 0.0
 ```
 
 ---

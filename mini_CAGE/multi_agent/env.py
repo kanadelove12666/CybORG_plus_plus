@@ -263,7 +263,7 @@ class SimplifiedMultiAgentCAGE:
     def _aggregate_blue_actions(
         self,
         agent_actions: Dict[int, np.ndarray]
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Aggregate actions from all agents into a single blue action.
 
@@ -274,9 +274,11 @@ class SimplifiedMultiAgentCAGE:
             agent_actions: Dict mapping agent_id to local action array
 
         Returns:
-            Global action array of shape (num_envs,)
+            global_actions: Global action array of shape (num_envs, 1)
+            executed_agent_mask: Mask of shape (num_envs, n_agents), 1 for the executed agent
         """
         global_actions = np.zeros(self.num_envs, dtype=np.int64)
+        executed_agent_mask = np.zeros((self.num_envs, self.n_agents), dtype=np.float32)
 
         # Process each environment separately
         for env_idx in range(self.num_envs):
@@ -287,13 +289,14 @@ class SimplifiedMultiAgentCAGE:
                     global_actions[env_idx] = convert_local_to_global_action(
                         agent_id, local_action
                     )
+                    executed_agent_mask[env_idx, agent_id] = 1.0
                     action_found = True
                     break
 
             if not action_found:
                 global_actions[env_idx] = 0  # All agents sleep
 
-        return global_actions.reshape(-1, 1)
+        return global_actions.reshape(-1, 1), executed_agent_mask
 
     def reset(self, env_indices: Optional[np.ndarray] = None) -> Tuple[Dict[int, np.ndarray], Dict]:
         """
@@ -395,7 +398,7 @@ class SimplifiedMultiAgentCAGE:
         red_action = self.red_agent.get_action(red_obs)
 
         # Aggregate blue actions
-        blue_action = self._aggregate_blue_actions(agent_actions)
+        blue_action, executed_agent_mask = self._aggregate_blue_actions(agent_actions)
 
         # Step the underlying environment
         sim_obs, reward_dict, _, info = self.sim.step(red_action, blue_action)
@@ -409,6 +412,7 @@ class SimplifiedMultiAgentCAGE:
 
         # Shared reward
         shared_reward = reward_dict['Blue'].flatten()
+        info['executed_agent_mask'] = executed_agent_mask
 
         # Compute global summary
         global_summary = self._compute_global_summary(sim_obs)

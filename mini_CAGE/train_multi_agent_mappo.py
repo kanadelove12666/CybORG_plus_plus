@@ -39,6 +39,7 @@ from multi_agent.config import (
     BATCH_SIZE,
     ENTROPY_COEF,
     VALUE_COEF,
+    NON_EXECUTED_WEIGHT,
     MAX_GRAD_NORM,
     MAX_STEPS,
     LOG_INTERVAL,
@@ -115,6 +116,10 @@ def parse_args():
     parser.add_argument(
         "--message_coef", type=float, default=MESSAGE_COEF,
         help="Message regularization coefficient"
+    )
+    parser.add_argument(
+        "--non_executed_weight", type=float, default=NON_EXECUTED_WEIGHT,
+        help="Policy-loss weight for non-executed agents (0.0 = executed-agent-only)"
     )
 
     # Logging
@@ -196,6 +201,7 @@ def print_config(args):
     print(f"  Clip range: {CLIP_RANGE}")
     print(f"  Entropy coef: {ENTROPY_COEF}")
     print(f"  Value coef: {VALUE_COEF}")
+    print(f"  Non-executed weight: {args.non_executed_weight}")
     print(f"  Max grad norm: {MAX_GRAD_NORM}")
 
     print(f"\nEnvironment:")
@@ -257,6 +263,7 @@ def train(args):
         batch_size=args.batch_size,
         entropy_coef=ENTROPY_COEF,
         value_coef=VALUE_COEF,
+        non_executed_weight=args.non_executed_weight,
         max_grad_norm=MAX_GRAD_NORM,
         message_coef=args.message_coef,
         device=device,
@@ -318,6 +325,7 @@ def train(args):
             print(f"| {' train/ ':<20} | {'value_loss':<12} | {update_stats['train/value_loss']:>12.6f} |")
             print(f"| {'':<20} | {'entropy':<12} | {update_stats['train/entropy']:>12.4f} |")
             print(f"| {'':<20} | {'entropy_coef':<12} | {update_stats['train/entropy_coef']:>12.6f} |")
+            print(f"| {'':<20} | {'non_exec_w':<12} | {update_stats['train/non_executed_weight']:>12.4f} |")
             print(f"| {'':<20} | {'approx_kl':<12} | {update_stats['train/approx_kl']:>12.6f} |")
             print(f"| {'':<20} | {'clip_fraction':<12} | {update_stats['train/clip_fraction']:>12.4f} |")
 
@@ -326,6 +334,12 @@ def train(args):
                 loss_key = f'agent_{agent_id}/policy_loss'
                 if loss_key in update_stats:
                     print(f"| {' agent_' + str(agent_id) + '/ ':<20} | {'policy_loss':<12} | {update_stats[loss_key]:>12.6f} |")
+                exec_key = rollout_stats['executed_ratio'][agent_id]
+                invalid_key = rollout_stats['invalid_action_rate'][agent_id]
+                mask_key = rollout_stats['mask_available_ratio'][agent_id]
+                print(f"| {' agent_' + str(agent_id) + '/ ':<20} | {'exec_ratio':<12} | {exec_key:>12.4f} |")
+                print(f"| {'':<20} | {'invalid_rate':<12} | {invalid_key:>12.4f} |")
+                print(f"| {'':<20} | {'mask_avail':<12} | {mask_key:>12.4f} |")
 
             # TensorBoard logging
             if trainer.writer is not None:
@@ -336,6 +350,7 @@ def train(args):
                 trainer.writer.add_scalar("train/value_loss", update_stats['train/value_loss'], trainer.num_timesteps)
                 trainer.writer.add_scalar("train/entropy", update_stats['train/entropy'], trainer.num_timesteps)
                 trainer.writer.add_scalar("train/entropy_coef", update_stats['train/entropy_coef'], trainer.num_timesteps)
+                trainer.writer.add_scalar("train/non_executed_weight", update_stats['train/non_executed_weight'], trainer.num_timesteps)
                 trainer.writer.add_scalar("train/approx_kl", update_stats['train/approx_kl'], trainer.num_timesteps)
                 trainer.writer.add_scalar("train/clip_fraction", update_stats['train/clip_fraction'], trainer.num_timesteps)
 
@@ -347,6 +362,21 @@ def train(args):
                             update_stats[loss_key],
                             trainer.num_timesteps
                         )
+                    trainer.writer.add_scalar(
+                        f"rollout/agent_{agent_id}_executed_ratio",
+                        rollout_stats['executed_ratio'][agent_id],
+                        trainer.num_timesteps
+                    )
+                    trainer.writer.add_scalar(
+                        f"rollout/agent_{agent_id}_invalid_action_rate",
+                        rollout_stats['invalid_action_rate'][agent_id],
+                        trainer.num_timesteps
+                    )
+                    trainer.writer.add_scalar(
+                        f"rollout/agent_{agent_id}_mask_available_ratio",
+                        rollout_stats['mask_available_ratio'][agent_id],
+                        trainer.num_timesteps
+                    )
 
                 trainer.writer.flush()
 

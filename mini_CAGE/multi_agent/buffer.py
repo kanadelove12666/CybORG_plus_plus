@@ -111,6 +111,7 @@ class MultiAgentBuffer:
         self.observations: Dict[int, np.ndarray] = {}
         self.actions: Dict[int, np.ndarray] = {}
         self.log_probs: Dict[int, np.ndarray] = {}
+        self.action_masks: Dict[int, np.ndarray] = {}
 
         for agent_id in range(n_agents):
             self.observations[agent_id] = np.zeros(
@@ -121,6 +122,9 @@ class MultiAgentBuffer:
             )
             self.log_probs[agent_id] = np.zeros(
                 (n_steps, n_envs), dtype=np.float32
+            )
+            self.action_masks[agent_id] = np.zeros(
+                (n_steps, n_envs, action_dims[agent_id]), dtype=np.float32
             )
 
         # Shared storage
@@ -133,6 +137,7 @@ class MultiAgentBuffer:
         self.rewards = np.zeros((n_steps, n_envs), dtype=np.float32)
         self.values = np.zeros((n_steps, n_envs), dtype=np.float32)
         self.dones = np.zeros((n_steps, n_envs), dtype=np.float32)
+        self.executed_masks = np.zeros((n_steps, n_envs, n_agents), dtype=np.float32)
 
         # Running statistics
         self.obs_rms: Dict[int, RunningMeanStd] = {
@@ -146,8 +151,10 @@ class MultiAgentBuffer:
         agent_obs: Dict[int, np.ndarray],
         agent_actions: Dict[int, np.ndarray],
         agent_log_probs: Dict[int, np.ndarray],
+        agent_action_masks: Dict[int, np.ndarray],
         global_state: np.ndarray,
         messages: np.ndarray,
+        executed_mask: np.ndarray,
         reward: np.ndarray,
         value: np.ndarray,
         done: np.ndarray
@@ -159,8 +166,10 @@ class MultiAgentBuffer:
             agent_obs: Dict mapping agent_id to observation (n_envs, obs_dim)
             agent_actions: Dict mapping agent_id to action (n_envs,)
             agent_log_probs: Dict mapping agent_id to log_prob (n_envs,)
+            agent_action_masks: Dict mapping agent_id to action mask (n_envs, action_dim)
             global_state: Global state (n_envs, global_state_dim)
             messages: All messages (n_envs, message_dim)
+            executed_mask: Mask of executed agents (n_envs, n_agents)
             reward: Shared reward (n_envs,)
             value: State value (n_envs,)
             done: Done flag (n_envs,)
@@ -172,10 +181,12 @@ class MultiAgentBuffer:
             self.observations[agent_id][self.ptr] = agent_obs[agent_id]
             self.actions[agent_id][self.ptr] = agent_actions[agent_id]
             self.log_probs[agent_id][self.ptr] = agent_log_probs[agent_id]
+            self.action_masks[agent_id][self.ptr] = agent_action_masks[agent_id]
 
         # Store shared data
         self.global_states[self.ptr] = global_state
         self.messages[self.ptr] = messages
+        self.executed_masks[self.ptr] = executed_mask
         self.rewards[self.ptr] = reward
         self.values[self.ptr] = value
         self.dones[self.ptr] = done
@@ -291,6 +302,10 @@ class MultiAgentBuffer:
                     self.log_probs[agent_id].flatten(),
                     device=self.device, dtype=torch.float32
                 ),
+                'action_masks': torch.as_tensor(
+                    self.action_masks[agent_id].reshape(-1, self.action_masks[agent_id].shape[-1]),
+                    device=self.device, dtype=torch.float32
+                ),
             }
 
         # Shared data
@@ -309,6 +324,10 @@ class MultiAgentBuffer:
             ),
             'returns': torch.as_tensor(
                 returns.flatten(),
+                device=self.device, dtype=torch.float32
+            ),
+            'executed_masks': torch.as_tensor(
+                self.executed_masks.reshape(-1, self.executed_masks.shape[-1]),
                 device=self.device, dtype=torch.float32
             ),
         }
@@ -368,15 +387,21 @@ if __name__ == "__main__":
             i: np.random.randn(n_envs).astype(np.float32)
             for i in range(n_agents)
         }
+        agent_action_masks = {
+            i: np.ones((n_envs, action_dims[i]), dtype=np.float32)
+            for i in range(n_agents)
+        }
         global_state = np.random.randn(n_envs, global_state_dim).astype(np.float32)
         messages = np.random.randn(n_envs, message_dim).astype(np.float32)
+        executed_mask = np.zeros((n_envs, n_agents), dtype=np.float32)
+        executed_mask[:, 0] = 1.0
         reward = np.random.randn(n_envs).astype(np.float32)
         value = np.random.randn(n_envs).astype(np.float32)
         done = np.zeros(n_envs, dtype=np.float32)
 
         buffer.store(
-            agent_obs, agent_actions, agent_log_probs,
-            global_state, messages, reward, value, done
+            agent_obs, agent_actions, agent_log_probs, agent_action_masks,
+            global_state, messages, executed_mask, reward, value, done
         )
 
     print(f"  Buffer size: {buffer.size}")
