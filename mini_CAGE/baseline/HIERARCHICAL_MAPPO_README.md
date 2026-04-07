@@ -2,7 +2,7 @@
 
 分层多智能体PPO (Hierarchical MAPPO) 训练框架，用于CybORG网络安全防御环境。
 
-> **重要更新 (2026-02-11)**: 已修复8个关键bug，包括worker value复制、explained_variance计算错误、bootstrap value获取错误等。详见[HIERARCHICAL_MAPPO_FIXES.md](HIERARCHICAL_MAPPO_FIXES.md)。
+> **重要更新 (2026-02-11)**: 已修复8个关键bug，包括 worker value 复制、explained variance 计算错误、bootstrap value 获取错误等。详见 [../docs/HIERARCHICAL_MAPPO_FIXES.md](../docs/HIERARCHICAL_MAPPO_FIXES.md)。
 
 ## 架构概述
 
@@ -52,12 +52,16 @@ hidden_dim = 128
 
 ## 文件结构
 
-```
+```text
 mini_CAGE/
-├── train_hierarchical_mappo.py   # 主训练脚本 (唯一需要的文件)
-├── single_agent_gym_wrapper.py   # MiniCageBlue环境包装器
-├── SB3_blue_training.py          # SB3 PPO基线 (对比用)
-└── HIERARCHICAL_MAPPO_README.md  # 本文档
+├── core/
+│   └── single_agent_gym_wrapper.py
+├── baseline/
+│   ├── train_hierarchical_mappo.py
+│   ├── SB3_blue_training.py
+│   └── HIERARCHICAL_MAPPO_README.md
+└── docs/
+    └── HIERARCHICAL_MAPPO_FIXES.md
 ```
 
 ## 使用方法
@@ -68,7 +72,7 @@ mini_CAGE/
 cd /Users/huangyinzhen/Documents/GitHub/CybORG_plus_plus
 mamba activate cyborg
 
-python mini_CAGE/train_hierarchical_mappo.py \
+python mini_CAGE/baseline/train_hierarchical_mappo.py \
     --total-timesteps 1000000 \
     --red-policy bline
 ```
@@ -76,7 +80,7 @@ python mini_CAGE/train_hierarchical_mappo.py \
 ### 完整参数
 
 ```bash
-python mini_CAGE/train_hierarchical_mappo.py \
+python mini_CAGE/baseline/train_hierarchical_mappo.py \
     --total-timesteps 1000000 \
     --red-policy bline \
     --learning-rate 0.002 \
@@ -179,14 +183,14 @@ action_mapping = {
 
 ## 保存的模型
 
-模型保存在 `hierarchical_mappo_models/` 目录:
+模型默认保存在仓库根目录下的 `hierarchical_mappo_models/` 目录:
 - `{run_name}_iter_{N}.pt`: 每10个iteration的检查点
 - `{run_name}_iter_final.pt`: 最终模型
 
 ## 加载预训练模型
 
 ```python
-from train_hierarchical_mappo import HierarchicalMAPPOTrainer, make_env
+from mini_CAGE.baseline.train_hierarchical_mappo import HierarchicalMAPPOTrainer, make_env
 
 env = make_env(red_policy="bline")
 trainer = HierarchicalMAPPOTrainer(env=env)
@@ -243,7 +247,7 @@ trainer.load_checkpoint("path/to/model.pt")
 - **Critic学习**: explained_variance稳定在0.5-0.8
 - **策略稳定性**: clip_fraction控制在0.02-0.1
 
-详细修复说明见 [HIERARCHICAL_MAPPO_FIXES.md](HIERARCHICAL_MAPPO_FIXES.md)
+详细修复说明见 [../docs/HIERARCHICAL_MAPPO_FIXES.md](../docs/HIERARCHICAL_MAPPO_FIXES.md)
 
 ## 引用
 

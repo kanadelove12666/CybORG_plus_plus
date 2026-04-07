@@ -11,13 +11,8 @@ Key Components:
 
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
-import sys
-import os
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from minimal import SimplifiedCAGE
+from ..core.minimal import SimplifiedCAGE
 from .config import (
     AGENT_HOST_ASSIGNMENT,
     HOST_TO_AGENT,
@@ -157,12 +152,12 @@ class SimplifiedMultiAgentCAGE:
     def _setup_red_policy(self):
         """Setup the red team policy."""
         if self.red_policy == "bline":
-            from test_agent import B_line_minimal
+            from ..core.test_agent import B_line_minimal
             # B_line_minimal has a bug in super().__init__, workaround
             self.red_agent = B_line_minimal.__new__(B_line_minimal)
             self.red_agent.num_envs = self.num_envs
         elif self.red_policy == "meander":
-            from test_agent import Meander_minimal
+            from ..core.test_agent import Meander_minimal
             self.red_agent = Meander_minimal.__new__(Meander_minimal)
             self.red_agent.num_envs = self.num_envs
         else:

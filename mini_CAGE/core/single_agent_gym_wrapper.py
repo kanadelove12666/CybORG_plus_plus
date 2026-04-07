@@ -1,14 +1,10 @@
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-import sys, os
 
-sys.path.append(os.path.expanduser("~/PycharmProjects/mini_cage_public")) # adjust to your path
-
-from minimal import SimplifiedCAGE, HOSTS
-# from CybORG_plus_plus.mini_CAGE.test_agents import Meander_minimal
-from red_bline_agent import B_line_minimal
-from test_agent import Meander_minimal
+from .minimal import HOSTS, SimplifiedCAGE
+from .red_bline_agent import B_line_minimal
+from .test_agent import Meander_minimal
 
 
 def make_red_agent(name: str, sim: SimplifiedCAGE):

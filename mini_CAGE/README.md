@@ -1,32 +1,45 @@
 # MiniCAGE: Simplified CAGE 2 CybORG Environment
 
-`mini_CAGE` is a simplified version of the CAGE 2 CybORG environment with a focus on greater execution speed and parallelisable runs. This repository includes a complete **CTDE-MAPPO** implementation for autonomous cyber defense agent training.
+`mini_CAGE` is a simplified CybORG environment focused on fast, reproducible training runs.  
+This repository's thesis mainline is:
+- **CTDE-MAPPO + Transformer entity encoding + action masking + stability optimization** (primary deliverable)
+- Hierarchical RL (Manager-Worker) as **optional extension**, not a mainline acceptance requirement.
+
+> Scope note: Results are reported in MiniCAGE and are **not** claimed as strict official CAGE4 evaluation alignment.
 
 ## Project Structure
 
 ```
 mini_CAGE/
-├── minimal.py                      # SimplifiedCAGE environment (13 hosts, 3 subnets)
-├── single_agent_gym_wrapper.py     # Gym wrapper (MiniCageBlue)
-├── entity_observation_wrapper.py   # Transformer encoder + action masking
-├── hierarchical_mappo.py           # CTDE-MAPPO algorithm (Actor + Critic)
-├── hierarchical_agents.py          # Manager-Worker hierarchical agents
-├── train_hierarchical_mappo.py     # Training script (single-agent MAPPO)
-├── baseline_agents.py              # RandomAgent + HeuristicAgent
-├── evaluate_baselines.py           # Baseline evaluation script
-├── SB3_blue_training.py            # Stable Baselines3 PPO baseline
-├── multi_agent/                    # Multi-Agent RL (MARL) implementation
-│   ├── config.py                   # Agent assignment, dimensions, hyperparameters
-│   ├── env.py                      # Multi-agent environment wrapper
-│   ├── models.py                   # Actor, Critic, MessageEncoder networks
-│   ├── buffer.py                   # Multi-agent buffer + GAE computation
-│   ├── trainer.py                  # Multi-agent MAPPO trainer
-│   └── gym_wrapper.py              # Gym interface wrapper
-├── train_multi_agent_mappo.py      # Multi-agent training script
+├── core/                           # Shared environment and observation infrastructure
+│   ├── minimal.py                  # SimplifiedCAGE environment (13 hosts, 3 subnets)
+│   ├── single_agent_gym_wrapper.py # Gym wrapper (MiniCageBlue)
+│   ├── entity_observation_wrapper.py
+│   ├── red_bline_agent.py
+│   └── test_agent.py
+├── baseline/                       # Baselines and non-mainline extensions
+│   ├── baseline_agents.py          # RandomAgent + HeuristicAgent
+│   ├── evaluate_baselines.py
+│   ├── SB3_blue_training.py
+│   ├── hierarchical_agents.py
+│   ├── hierarchical_mappo.py
+│   ├── train_hierarchical_mappo.py
+│   └── HIERARCHICAL_MAPPO_README.md
+├── multi_agent/                    # Mainline multi-agent MAPPO implementation
+│   ├── config.py
+│   ├── env.py
+│   ├── models.py
+│   ├── buffer.py
+│   ├── trainer.py
+│   └── gym_wrapper.py
+├── train_multi_agent_mappo.py      # Mainline training entry
+├── run_ablation_experiments.py
 └── docs/
-    ├── PROJECT_STATUS.md           # Project status and roadmap
-    ├── MARL_IMPLEMENTATION.md      # MARL implementation details
-    └── 毕设题目研究内容与意义说明.md  # Thesis proposal (Chinese)
+    ├── MARL_IMPLEMENTATION.md
+    ├── MAPPO_STABILITY_FIX.md
+    ├── HIERARCHICAL_MAPPO_FIXES.md
+    ├── OPTIMIZATION_SUMMARY.md
+    └── readme.md                   # Thesis mainline method writeup
 ```
 
 ## Installation
@@ -45,7 +58,7 @@ pip install numpy gymnasium torch stable-baselines3
 ### Basic Environment Usage
 
 ```python
-from single_agent_gym_wrapper import MiniCageBlue
+from mini_CAGE.core.single_agent_gym_wrapper import MiniCageBlue
 
 # Create environment with B-line attacker
 env = MiniCageBlue(red_policy="bline", max_steps=100)
@@ -61,7 +74,7 @@ for _ in range(100):
 ### Baseline Agents
 
 ```python
-from baseline_agents import RandomAgent, HeuristicAgent
+from mini_CAGE.baseline.baseline_agents import RandomAgent, HeuristicAgent
 
 # Random agent (performance lower bound)
 random_agent = RandomAgent(num_actions=53)
@@ -77,7 +90,7 @@ action = agent.get_action(observation)
 
 ```bash
 # Run evaluation
-python evaluate_baselines.py --num_episodes 100 --red_policy bline
+python mini_CAGE/baseline/evaluate_baselines.py --num_episodes 100 --red_policy bline
 
 # Output:
 # Agent           |  Mean Reward |        Std
@@ -85,32 +98,65 @@ python evaluate_baselines.py --num_episodes 100 --red_policy bline
 # Heuristic       |     -1053.08 |     891.31
 ```
 
-### Train Hierarchical MAPPO
+### Train Hierarchical MAPPO (Baseline)
 
 ```bash
 # Train with default settings
-python train_hierarchical_mappo.py
+python mini_CAGE/baseline/train_hierarchical_mappo.py \
+  --total-timesteps 1000000 \
+  --red-policy bline \
+  --learning-rate 3e-4 \
+  --n-rollout-steps 2048 \
+  --batch-size 256 \
+  --n-epochs 10 \
+  --entropy-coef 0.05 \
+  --target-kl 0.02
 
-# Training converges in ~72 epochs
-# Reward: -126 → -72
+# Typical stable range:
+# Reward: around -75 (best observed about -62 in historical run)
 ```
 
-### Train Multi-Agent MAPPO
+### Train Multi-Agent MAPPO (Mainline, Recommended)
 
 ```bash
 # Train 5 collaborative agents with communication
-python train_multi_agent_mappo.py
+python mini_CAGE/train_multi_agent_mappo.py \
+  --total_timesteps 1000000 \
+  --red_policy bline \
+  --learning_rate 3e-4 \
+  --n_envs 8 \
+  --n_steps 128 \
+  --batch_size 256 \
+  --n_epochs 10 \
+  --entropy_coef 0.01 \
+  --min_entropy_coef 0.001 \
+  --target_kl 0.012 \
+  --non_executed_weight 0.0
 
-# Custom parameters
-python train_multi_agent_mappo.py \
-    --total_timesteps 500000 \
-    --n_envs 16 \
-    --red_policy bline \
-    --learning_rate 1e-4
+# Typical stable range:
+# Reward: around -20 to -30 (best observed around -20)
+```
 
-# Monitor training
+Monitor training:
+```bash
 tensorboard --logdir multi_agent_tensorboard/
 ```
+
+### Run Ablations (Independent Script)
+
+This repo now provides a standalone launcher:
+
+```bash
+# Plan only (print commands, do not run)
+python mini_CAGE/run_ablation_experiments.py --algo both --seeds 0,1,2
+
+# Execute all commands sequentially
+python mini_CAGE/run_ablation_experiments.py --algo both --seeds 0,1,2 --run
+```
+
+Ablations included by default:
+- Multi-agent: `baseline`, `no_transformer`, `no_action_mask`, `no_stability`
+- Hierarchical: `baseline`, `no_obs_norm`, `no_reward_norm`, `no_stability`
 
 ## Environment Details
 
@@ -141,15 +187,15 @@ tensorboard --logdir multi_agent_tensorboard/
 - **3 Subnets:** Enterprise, Operational, User
 - **Red Policies:** B-line (fixed attack chain), Meander (random walk)
 
-## Baseline Performance (100 episodes, B-line)
+## Baseline Performance (MiniCAGE, B-line)
 
 | Agent | Mean Reward | Std | Notes |
 |-------|-------------|-----|-------|
 | RandomAgent | -1702.63 | 593.65 | Random action selection |
 | HeuristicAgent | -1053.08 | 891.31 | Decoy-prioritized rules |
-| PPO-MLP | ~-80 | - | Stable Baselines3 |
-| Hierarchical-MAPPO | ~-72 | - | Single-agent hierarchical |
-| **Multi-Agent MAPPO** | **~-25** | - | **5 agents with communication** |
+| PPO-MLP | ~-94 (last) | - | Stable Baselines3 |
+| Hierarchical-MAPPO | ~-72 (last) | - | Single-agent hierarchical |
+| **Multi-Agent MAPPO** | **~-28 (last)** | - | **Mainline method** |
 
 ## Key Features
 
@@ -172,7 +218,7 @@ tensorboard --logdir multi_agent_tensorboard/
 | 3 | user0-2 | User A |
 | 4 | user3-4 | User B |
 
-### Hierarchical RL
+### Hierarchical RL Baseline
 - Manager: Selects sub-goals (Investigate/Isolate/Restore/Decoy)
 - Worker: Executes atomic actions
 - Temporal abstraction reduces effective episode length
@@ -198,8 +244,10 @@ tensorboard --logdir multi_agent_tensorboard/
 
 ## Documentation
 
+- [Method Writeup](docs/readme.md) - Thesis mainline method and formalization
 - [MARL Implementation](docs/MARL_IMPLEMENTATION.md) - Multi-agent RL architecture and training details
-- [Project Status](docs/PROJECT_STATUS.md) - Development roadmap and current status
+- [Baseline Overview](baseline/README.md) - Baseline directory, scope, and entrypoints
+- [Hierarchical Baseline Notes](baseline/HIERARCHICAL_MAPPO_README.md) - Hierarchical baseline details
 
 ## Speed Comparison
 

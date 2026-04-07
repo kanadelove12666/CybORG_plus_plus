@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import gymnasium as gym
 from gymnasium import spaces
 
-from minimal import HOSTS, BLUE_ACTIONS, check_blue_action, default_defender_decoys
+from .minimal import HOSTS, BLUE_ACTIONS, check_blue_action, default_defender_decoys
 
 
 # =============================================================================
@@ -615,7 +615,7 @@ def example_usage():
     print("=" * 60)
 
     # Import environment
-    from single_agent_gym_wrapper import MiniCageBlue
+    from .single_agent_gym_wrapper import MiniCageBlue
 
     # Create base environment
     env = MiniCageBlue(red_policy="bline", max_steps=100, remove_bugs=True)
@@ -790,7 +790,7 @@ def example_integration_with_mappo():
     print("MAPPO Integration Example")
     print("=" * 60)
 
-    from single_agent_gym_wrapper import MiniCageBlue
+    from .single_agent_gym_wrapper import MiniCageBlue
 
     # Create environment
     env = MiniCageBlue(red_policy="bline", max_steps=100, remove_bugs=True)

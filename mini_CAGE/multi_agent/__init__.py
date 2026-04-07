@@ -60,8 +60,12 @@ from .config import (
 from .env import SimplifiedMultiAgentCAGE, CommunicationChannel
 from .models import MultiAgentActor, MessageEncoder, MultiAgentCentralizedCritic
 from .buffer import MultiAgentBuffer
-from .trainer import MultiAgentMAPPOTrainer
 from .gym_wrapper import MultiAgentMiniCage
+
+try:
+    from .trainer import MultiAgentMAPPOTrainer
+except ModuleNotFoundError:
+    MultiAgentMAPPOTrainer = None
 
 __all__ = [
     # Config

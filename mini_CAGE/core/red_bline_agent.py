@@ -1,25 +1,8 @@
 
 import random
 import numpy as np
-from minimal import HOSTS
-from test_agent import Base_agent
-
-
-class Base_agent:
-    def __init__(self):
-        pass
-
-    def train(self):
-        pass
-
-    def get_action(self):
-        pass
-
-    def end_episode(self):
-        pass
-
-    def set_initial_values(self):
-        pass
+from .minimal import HOSTS
+from .test_agent import Base_agent
 
 
 class B_line_minimal(Base_agent):
@@ -289,4 +272,3 @@ class B_line_minimal(Base_agent):
         self.last_host = None
         self.last_action = None
         self.first_user_host = None  # first user host to scan, set on first DiscoverNetworkServices_user
-

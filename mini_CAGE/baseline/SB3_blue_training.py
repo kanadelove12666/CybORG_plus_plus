@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime
 from multiprocessing import Process, set_start_method
 from pathlib import Path
+import sys
 from typing import Optional
 import time
 
@@ -17,8 +18,12 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
-from single_agent_gym_wrapper import MiniCageBlue
 from stable_baselines3.common.callbacks import BaseCallback
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from mini_CAGE.core.single_agent_gym_wrapper import MiniCageBlue
 
 # ═══════════════════════════════════════════════════════════════════════
 # Training Config

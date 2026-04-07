@@ -17,16 +17,17 @@ import sys
 import time
 import argparse
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-# Add current directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from multi_agent.config import (
+from mini_CAGE.multi_agent.config import (
     # Training hyperparameters (aligned with train_hierarchical_mappo.py)
     TOTAL_TIMESTEPS,
     LEARNING_RATE,
@@ -38,6 +39,8 @@ from multi_agent.config import (
     N_STEPS,
     BATCH_SIZE,
     ENTROPY_COEF,
+    MIN_ENTROPY_COEF,
+    TARGET_KL,
     VALUE_COEF,
     NON_EXECUTED_WEIGHT,
     MAX_GRAD_NORM,
@@ -57,8 +60,8 @@ from multi_agent.config import (
     AGENT_HOST_ASSIGNMENT,
     HOST_NAMES,
 )
-from multi_agent.gym_wrapper import MultiAgentMiniCage, make_multi_agent_env
-from multi_agent.trainer import MultiAgentMAPPOTrainer
+from mini_CAGE.multi_agent.gym_wrapper import MultiAgentMiniCage, make_multi_agent_env
+from mini_CAGE.multi_agent.trainer import MultiAgentMAPPOTrainer
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -95,6 +98,18 @@ def parse_args():
     parser.add_argument(
         "--n_epochs", type=int, default=N_EPOCHS,
         help="Number of PPO epochs per update"
+    )
+    parser.add_argument(
+        "--entropy_coef", type=float, default=ENTROPY_COEF,
+        help="Entropy coefficient"
+    )
+    parser.add_argument(
+        "--min_entropy_coef", type=float, default=MIN_ENTROPY_COEF,
+        help="Minimum entropy coefficient for annealing"
+    )
+    parser.add_argument(
+        "--target_kl", type=float, default=TARGET_KL,
+        help="Target KL for early stopping; <=0 disables early stop"
     )
 
     # Environment
@@ -158,6 +173,30 @@ def parse_args():
         "--resume", type=str, default=None,
         help="Path to checkpoint to resume from"
     )
+    parser.add_argument(
+        "--no_transformer", action="store_true",
+        help="Use MLP encoders instead of Transformer (ablation)"
+    )
+    parser.add_argument(
+        "--no_action_mask", action="store_true",
+        help="Disable action mask in sampling/training (ablation)"
+    )
+    parser.add_argument(
+        "--no_obs_norm", action="store_true",
+        help="Disable observation normalization"
+    )
+    parser.add_argument(
+        "--no_reward_norm", action="store_true",
+        help="Disable reward normalization"
+    )
+    parser.add_argument(
+        "--no_lr_schedule", action="store_true",
+        help="Disable linear learning-rate schedule"
+    )
+    parser.add_argument(
+        "--no_stability_tricks", action="store_true",
+        help="Disable normalization, LR schedule, KL early stop and entropy annealing (ablation)"
+    )
 
     return parser.parse_args()
 
@@ -178,7 +217,27 @@ def setup_device(device_str: str) -> torch.device:
     return torch.device(device_str)
 
 
-def print_config(args):
+def resolve_training_options(args):
+    """Resolve ablation/stability toggles into effective runtime options."""
+    options = {
+        "use_transformer": not args.no_transformer,
+        "use_action_mask": not args.no_action_mask,
+        "normalize_obs": not args.no_obs_norm,
+        "normalize_reward": not args.no_reward_norm,
+        "use_linear_lr_schedule": not args.no_lr_schedule,
+        "min_entropy_coef": args.min_entropy_coef,
+        "target_kl": args.target_kl if args.target_kl > 0 else None,
+    }
+    if args.no_stability_tricks:
+        options["normalize_obs"] = False
+        options["normalize_reward"] = False
+        options["use_linear_lr_schedule"] = False
+        options["target_kl"] = None
+        options["min_entropy_coef"] = args.entropy_coef
+    return options
+
+
+def print_config(args, options):
     """Print training configuration."""
     print("=" * 80)
     print("Multi-Agent MAPPO Training Configuration")
@@ -199,10 +258,18 @@ def print_config(args):
     print(f"  Gamma: {GAMMA}")
     print(f"  GAE lambda: {GAE_LAMBDA}")
     print(f"  Clip range: {CLIP_RANGE}")
-    print(f"  Entropy coef: {ENTROPY_COEF}")
+    print(f"  Entropy coef: {args.entropy_coef}")
+    print(f"  Min entropy coef: {options['min_entropy_coef']}")
+    print(f"  Target KL: {options['target_kl']}")
     print(f"  Value coef: {VALUE_COEF}")
     print(f"  Non-executed weight: {args.non_executed_weight}")
     print(f"  Max grad norm: {MAX_GRAD_NORM}")
+    print(f"  Use Transformer: {options['use_transformer']}")
+    print(f"  Use Action Mask: {options['use_action_mask']}")
+    print(f"  Normalize Obs: {options['normalize_obs']}")
+    print(f"  Normalize Reward: {options['normalize_reward']}")
+    print(f"  LR Schedule: {options['use_linear_lr_schedule']}")
+    print(f"  Disable Stability Tricks: {args.no_stability_tricks}")
 
     print(f"\nEnvironment:")
     print(f"  Red policy: {args.red_policy}")
@@ -222,7 +289,8 @@ def train(args):
     # Setup
     setup_seed(args.seed)
     device = setup_device(args.device)
-    print_config(args)
+    options = resolve_training_options(args)
+    print_config(args, options)
 
     # Create environment
     print("\nCreating environment...")
@@ -261,12 +329,19 @@ def train(args):
         clip_range=CLIP_RANGE,
         n_epochs=args.n_epochs,
         batch_size=args.batch_size,
-        entropy_coef=ENTROPY_COEF,
+        entropy_coef=args.entropy_coef,
+        min_entropy_coef=options["min_entropy_coef"],
+        target_kl=options["target_kl"],
         value_coef=VALUE_COEF,
         non_executed_weight=args.non_executed_weight,
         max_grad_norm=MAX_GRAD_NORM,
         message_coef=args.message_coef,
+        use_transformer=options["use_transformer"],
+        use_action_mask=options["use_action_mask"],
         device=device,
+        use_linear_lr_schedule=options["use_linear_lr_schedule"],
+        normalize_obs=options["normalize_obs"],
+        normalize_reward=options["normalize_reward"],
         save_dir=args.save_dir,
     )
 

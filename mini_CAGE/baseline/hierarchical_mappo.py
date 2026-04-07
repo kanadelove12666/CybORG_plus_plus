@@ -20,6 +20,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
@@ -29,8 +30,10 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.optim import Adam
 
-# Import environment wrapper
-from single_agent_gym_wrapper import MiniCageBlue
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from mini_CAGE.core.single_agent_gym_wrapper import MiniCageBlue
 
 # ═══════════════════════════════════════════════════════════════════════
 # Training Config (Aligned with SB3_blue_training.py)

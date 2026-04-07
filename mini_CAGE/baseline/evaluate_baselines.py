@@ -1,7 +1,13 @@
 import numpy as np
 import argparse
-from single_agent_gym_wrapper import MiniCageBlue
-from baseline_agents import RandomAgent, HeuristicAgent
+from pathlib import Path
+import sys
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from mini_CAGE.baseline.baseline_agents import HeuristicAgent, RandomAgent
+from mini_CAGE.core.single_agent_gym_wrapper import MiniCageBlue
 
 def evaluate_agent(agent, env, num_episodes=100):
     """评估单个智能体"""

@@ -26,10 +26,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from single_agent_gym_wrapper import MiniCageBlue
+from mini_CAGE.core.single_agent_gym_wrapper import MiniCageBlue
 
 # ═══════════════════════════════════════════════════════════════════════
 # Training Config (Strictly aligned with SB3_blue_training.py)
@@ -941,7 +941,7 @@ class MAPPOTrainer:
                 num_updates += 1
 
             # KL Early Stopping (check after each epoch)
-            if self.target_kl is not None and total_approx_kl / num_updates > self.target_kl:
+            if self.target_kl is not None and self.target_kl > 0 and total_approx_kl / num_updates > self.target_kl:
                 early_stopped = True
                 break
 
@@ -1011,6 +1011,8 @@ class HierarchicalMAPPOTrainer:
         use_tensorboard: bool = USE_TENSORBOARD,
         run_name: Optional[str] = None,
         use_linear_lr_schedule: bool = True,
+        normalize_obs: bool = True,
+        normalize_rewards: bool = True,
     ):
         self.env = env
         self.total_timesteps = total_timesteps
@@ -1066,8 +1068,8 @@ class HierarchicalMAPPOTrainer:
         self.obs_rms = RunningMeanStd(shape=(self.obs_dim,))
         self.ret_rms = RunningMeanStd(shape=())  # Scalar return normalization
         self.reward_scale = 1.0  # Will be updated based on running statistics
-        self.normalize_obs = True
-        self.normalize_rewards = True
+        self.normalize_obs = normalize_obs
+        self.normalize_rewards = normalize_rewards
 
         if use_tensorboard:
             from torch.utils.tensorboard import SummaryWriter
@@ -1444,6 +1446,21 @@ def parse_args():
         action="store_true",
         help="Disable linear learning rate schedule",
     )
+    parser.add_argument(
+        "--no-obs-norm",
+        action="store_true",
+        help="Disable observation normalization",
+    )
+    parser.add_argument(
+        "--no-reward-norm",
+        action="store_true",
+        help="Disable reward normalization",
+    )
+    parser.add_argument(
+        "--no-stability-tricks",
+        action="store_true",
+        help="Disable obs/reward norm, LR schedule and KL early stop (ablation)",
+    )
 
     # Model arguments
     parser.add_argument(
@@ -1478,6 +1495,13 @@ def parse_args():
         default=0,
         help="Random seed (default: 0)",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Device to use",
+    )
 
     args = parser.parse_args()
     # Convert --no-lr-schedule to use_linear_lr_schedule
@@ -1488,6 +1512,10 @@ def parse_args():
 def main():
     """Main entry point."""
     args = parse_args()
+    if args.device == "auto":
+        device = DEVICE
+    else:
+        device = torch.device(args.device)
 
     # Set random seeds
     np.random.seed(args.seed)
@@ -1506,6 +1534,18 @@ def main():
     time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = args.run_name or f"hierarchical_mappo_{args.red_policy}_{time_tag}"
 
+    # Resolve ablation/stability toggles
+    normalize_obs = not args.no_obs_norm
+    normalize_rewards = not args.no_reward_norm
+    use_linear_lr_schedule = args.use_linear_lr_schedule
+    target_kl = args.target_kl
+
+    if args.no_stability_tricks:
+        normalize_obs = False
+        normalize_rewards = False
+        use_linear_lr_schedule = False
+        target_kl = 0.0
+
     # Create trainer with all SB3-aligned hyperparameters
     trainer = HierarchicalMAPPOTrainer(
         env=env,
@@ -1520,14 +1560,16 @@ def main():
         value_coef=args.value_coef,
         entropy_coef=args.entropy_coef,
         max_grad_norm=args.max_grad_norm,
-        target_kl=args.target_kl,
+        target_kl=target_kl,
         hidden_dim=args.hidden_dim,
-        device=DEVICE,
+        device=device,
         save_dir=SAVE_DIR,
         use_wandb=args.use_wandb,
         use_tensorboard=args.use_tensorboard,
         run_name=run_name,
-        use_linear_lr_schedule=args.use_linear_lr_schedule,
+        use_linear_lr_schedule=use_linear_lr_schedule,
+        normalize_obs=normalize_obs,
+        normalize_rewards=normalize_rewards,
     )
 
     # Train
